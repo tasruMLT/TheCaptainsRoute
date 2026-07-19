@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0f3a5f" />
+  <title>Harbour Run</title>
+  <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-192.png" />
+  <link rel="apple-touch-icon" href="assets/icon-192.png" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="hud-top">
+      <h1>Harbour Run</h1>
+      <p>Cruise ship is blue. Pirate ship is yellow. Screen is locked for focus play.</p>
+    </header>
+    <canvas id="gameCanvas" width="1200" height="700" aria-label="Harbour Run game canvas"></canvas>
+    <section class="controls">
+      <div>
+        <h2>Player 1</h2>
+        <p>Default Move: W A S D</p>
+        <p>Default Attack: Space</p>
+      </div>
+      <div>
+        <h2>Player 2 (Local Mode)</h2>
+        <p>Default Move: Arrow Keys</p>
+        <p>Default Attack: Right Shift</p>
+      </div>
+      <div>
+        <h2>Menu</h2>
+        <p>1 = Single Player vs Computer</p>
+        <p>2 = Local 2 Player</p>
+        <p>K = Settings (custom gameplay + key bindings)</p>
+        <p>Shop: Enter to buy, Backspace to sell, Tab to switch player</p>
+      </div>
+    </section>
+  </main>
+  <script src="game.js"></script>
+</body>
+</html>
