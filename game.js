@@ -1,5 +1,11 @@
 const canvas = document.getElementById("gameCanvas");
+if (!(canvas instanceof HTMLCanvasElement)) {
+  throw new Error("Harbour Run init failed: #gameCanvas element not found.");
+}
 const ctx = canvas.getContext("2d");
+if (!ctx) {
+  throw new Error("Harbour Run init failed: 2D canvas context is unavailable.");
+}
 
 const WIDTH = canvas.width;
 const HEIGHT = canvas.height;

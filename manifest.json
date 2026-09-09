@@ -1,0 +1,9 @@
+{
+  "name": "Harbour Run",
+  "short_name": "HarbourRun",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#051824",
+  "theme_color": "#0f3a5f",
+  "description": "Canvas-based naval action game playable in browser."
+}
