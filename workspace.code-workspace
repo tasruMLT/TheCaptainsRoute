@@ -6,5 +6,15 @@
         {
             "path": "../swingalgo/swing_algo"
         }
-    ]
+    ],
+    "settings": {
+        "python-envs.pythonProjects": [
+            {
+                "path": "src/ranked_trading_launcher.py",
+                "envManager": "ms-python.python:venv",
+                "packageManager": "ms-python.python:pip",
+                "workspace": "swing_algo"
+            }
+        ]
+    }
 }
