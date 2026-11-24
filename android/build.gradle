@@ -1,0 +1,49 @@
+// Harbour Run for Android: a full-screen WebView that runs the same game
+// files as the desktop version. Build with build-apk.ps1.
+plugins {
+    id "com.android.application" version "8.12.1"
+}
+
+// The app version follows GAME_VERSION in game.js (2.41.0 -> code 24100).
+def gameVersion = (file("../game.js").text =~ /const GAME_VERSION = "(\d+)\.(\d+)\.(\d+)"/)[0]
+
+android {
+    namespace "com.harbourrun.game"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.harbourrun.game"
+        minSdk 26
+        targetSdk 36
+        versionName "${gameVersion[1]}.${gameVersion[2]}.${gameVersion[3]}"
+        versionCode gameVersion[1].toInteger() * 10000 + gameVersion[2].toInteger() * 100 + gameVersion[3].toInteger()
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs += [layout.buildDirectory.dir("webassets").get().asFile]
+        }
+    }
+}
+
+dependencies {
+    implementation "androidx.webkit:webkit:1.12.1"
+}
+
+// Copy the game files into the APK (served to the WebView from assets/web/).
+// Every top-level web file is taken, so a new desktop .js/.css file reaches the
+// app without editing this list. Only desktop-only files are left out.
+tasks.register("copyWebFiles", Sync) {
+    from("..") {
+        include "*.html", "*.css", "*.js", "*.json"
+        include "assets/**", "vendor/**"
+        exclude "serve.js", "service-worker.js"
+    }
+    into(layout.buildDirectory.dir("webassets/web"))
+}
+tasks.named("preBuild") { dependsOn "copyWebFiles" }

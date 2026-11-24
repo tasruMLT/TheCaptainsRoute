@@ -57,18 +57,41 @@ html {
   color: #c7dbe5;
 }
 
-#gameCanvas {
+/* The 3D world canvas fills the stage; the 2D canvas (HUD, menus, labels)
+   sits on top, letterboxed to keep its 1200x700 layout. */
+.stage {
   grid-area: game;
-  width: 100%;
-  height: 100%;
-  max-height: calc(100vh - 90px);
+  position: relative;
   min-height: 0;
-  object-fit: contain;
+  max-height: calc(100vh - 90px);
+  overflow: hidden;
   border-radius: 14px;
   border: 2px solid rgba(236, 245, 249, 0.35);
   background: linear-gradient(180deg, var(--sea-a), var(--sea-b));
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+}
+
+.stage canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#gameCanvas {
+  object-fit: contain;
   touch-action: none;
+}
+
+/* Menus over the 3D world: dim the whole stage, not just the 1200x700 area. */
+body.view-3d:not(.playing-mode) #gameCanvas {
+  background: rgba(2, 12, 18, 0.62);
+}
+
+/* the dockyard (shop) is a scene to look at: no tint over it */
+body.view-3d.in-dockyard #gameCanvas {
+  background: transparent;
 }
 
 .controls {
@@ -98,7 +121,7 @@ body.playing-mode .controls {
   display: none;
 }
 
-body.playing-mode #gameCanvas {
+body.playing-mode .stage {
   max-height: 100vh;
   border-radius: 0;
   border: none;
@@ -141,7 +164,164 @@ body.playing-mode #gameCanvas {
     max-height: none;
   }
 
-  #gameCanvas {
+  .stage {
     max-height: calc(100vh - 230px);
   }
+}
+
+/* Touch screens (phones, tablets, the Android app): the game fills the
+   screen, the keyboard help is hidden, and on-screen controls appear. */
+body.touch-ui .app-shell {
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: "game";
+  padding: 0;
+  gap: 0;
+}
+
+body.touch-ui .hud-top,
+body.touch-ui .controls {
+  display: none;
+}
+
+body.touch-ui .stage {
+  max-height: 100vh;
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
+}
+
+.touch-controls,
+.tc-play,
+.tc-back {
+  display: none;
+}
+
+body.touch-ui .touch-controls {
+  display: block;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body.touch-ui.playing-mode .tc-play,
+body.touch-ui:not(.playing-mode):not(.at-main-menu) .tc-back {
+  display: block;
+}
+
+.touch-controls button,
+.tc-stick {
+  pointer-events: auto;
+  touch-action: none;
+  font-family: inherit;
+  color: var(--text);
+  background: rgba(8, 30, 44, 0.42);
+  border: 2px solid rgba(236, 245, 249, 0.45);
+}
+
+.touch-controls button {
+  border-radius: 12px;
+  font-size: clamp(11px, 3.2vmin, 16px);
+  padding: 0;
+}
+
+.touch-controls button.pressed {
+  background: rgba(242, 181, 49, 0.55);
+}
+
+.tc-stick {
+  position: absolute;
+  left: 3vmin;
+  bottom: 13vmin; /* above the damage panel */
+  width: 34vmin;
+  height: 34vmin;
+  border-radius: 50%;
+}
+
+.tc-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 15vmin;
+  height: 15vmin;
+  margin: -7.5vmin 0 0 -7.5vmin;
+  border-radius: 50%;
+  background: rgba(236, 245, 249, 0.55);
+  pointer-events: none;
+}
+
+.tc-fire {
+  position: absolute;
+  right: 2vmin;
+  bottom: 6vmin;
+  width: 24vmin;
+  height: 24vmin;
+  border-radius: 50% !important;
+  font-weight: 700;
+  background: rgba(150, 40, 30, 0.5) !important;
+}
+
+.tc-side {
+  position: absolute;
+  right: 2vmin;
+  bottom: 33vmin; /* above Fire, clear of the minimap */
+  display: grid;
+  grid-template-columns: repeat(2, 14vmin);
+  gap: 1.6vmin;
+}
+
+.tc-side button {
+  height: 10vmin;
+}
+
+.tc-corner {
+  position: absolute;
+  top: 2vmin;
+  left: 2vmin;
+  width: 15vmin;
+  height: 9vmin;
+}
+
+/* Shown until the game (and its 3D world) draws smoothly; game.js adds
+   body.loaded. The first 3D frames can take seconds on a phone. */
+.loading {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: clamp(18px, 5vmin, 32px);
+  line-height: 1.5;
+  color: var(--text);
+  background: linear-gradient(160deg, var(--bg-deep), var(--bg-mid));
+}
+
+body.loaded .loading {
+  display: none;
+}
+
+/* Ship's fire alarm on the bridge (game.js fireAlarmOn): a red border that
+   pulses around the whole screen. Taps go through it. */
+.alarm-border {
+  display: none;
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 8px rgba(225, 30, 20, 0.95), inset 0 0 70px 20px rgba(225, 30, 20, 0.55);
+}
+
+body.fire-alarm .alarm-border {
+  display: block;
+  animation: alarm-flash 0.6s ease-in-out infinite;
+}
+
+@keyframes alarm-flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.15; }
 }

@@ -2,8 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#0f3a5f" />
+  <meta name="description" content="Sail your ship between harbours, dodge hazards, and outmaneuver pirates in Harbour Run." />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>Harbour Run</title>
   <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-192.png" />
   <link rel="apple-touch-icon" href="assets/icon-192.png" />
@@ -16,27 +20,60 @@
       <h1>Harbour Run</h1>
       <p>Cruise ship is blue. Pirate ship is yellow. Screen is locked for focus play.</p>
     </header>
-    <canvas id="gameCanvas" width="1200" height="700" aria-label="Harbour Run game canvas"></canvas>
+    <div class="stage">
+      <canvas id="view3d" aria-hidden="true"></canvas>
+      <canvas id="gameCanvas" width="1200" height="700" aria-label="Harbour Run game canvas"></canvas>
+      <div class="alarm-border" aria-hidden="true"></div>
+      <div id="loading" class="loading">Loading Harbour Run...<br />please wait</div>
+      <!-- Touch screens only (phones, tablets): on-screen controls. -->
+      <div id="touchControls" class="touch-controls" aria-hidden="true">
+        <div class="tc-play">
+          <div class="tc-stick" id="tcStick"><div class="tc-knob" id="tcKnob"></div></div>
+          <div class="tc-side">
+            <button data-action="cameraView">Camera</button>
+            <button data-action="p1Anchor">Anchor</button>
+            <button data-action="p1Repair">Repair</button>
+            <button data-action="p1Fire">Water</button>
+            <button data-action="p1Tow">Tow</button>
+            <button data-action="p1Deterrent">Horn</button>
+            <button data-action="p1SlideLeft">Slide &lt;</button>
+            <button data-action="p1SlideRight">Slide &gt;</button>
+          </div>
+          <button class="tc-fire" data-action="p1Attack">Fire</button>
+          <button class="tc-corner" data-code="Escape">Pause</button>
+        </div>
+        <button class="tc-back tc-corner" data-code="Escape">Back</button>
+      </div>
+    </div>
     <section class="controls">
       <div>
         <h2>Player 1</h2>
         <p>Default Move: W A S D</p>
         <p>Default Attack: Space</p>
+        <p><span data-keyhelp="p1Deterrent">G</span> = Acoustic Deterrent (if bought)</p>
       </div>
       <div>
         <h2>Player 2 (Local Mode)</h2>
         <p>Default Move: Arrow Keys</p>
         <p>Default Attack: Right Shift</p>
+        <p><span data-keyhelp="p2Deterrent">;</span> = Acoustic Deterrent (if bought)</p>
       </div>
       <div>
         <h2>Menu</h2>
         <p>1 = Single Player vs Computer</p>
         <p>2 = Local 2 Player</p>
-        <p>K = Settings (custom gameplay + key bindings)</p>
+        <p>K = Settings (custom gameplay + all key bindings)</p>
+        <p><span data-keyhelp="cameraView">C</span> = Switch camera (overview / chase / bridge) while sailing</p>
+        <p><span data-keyhelp="nightMode">N</span> = Day / night</p>
         <p>Shop: Enter to buy, Backspace to sell, Tab to switch player</p>
       </div>
     </section>
   </main>
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }
+  </script>
+  <script src="audio.js"></script>
   <script src="game.js"></script>
+  <script type="module" src="render3d.js"></script>
 </body>
 </html>
