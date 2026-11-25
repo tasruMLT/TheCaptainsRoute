@@ -1,6 +1,6 @@
 // Shown in the Settings menu. Bump it with each release so players (and
 // bug reports) can tell which build is running.
-const GAME_VERSION = "2.87.0";
+const GAME_VERSION = "2.87.1";
 
 const canvas = document.getElementById("gameCanvas");
 if (!(canvas instanceof HTMLCanvasElement)) {

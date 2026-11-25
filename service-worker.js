@@ -1,4 +1,4 @@
-const CACHE = "harbour-run-v77";
+const CACHE = "harbour-run-v78";
 const ASSETS = [
   "./",
   "./index.html",
