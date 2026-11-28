@@ -1,6 +1,6 @@
 // Shown in the Settings menu. Bump it with each release so players (and
 // bug reports) can tell which build is running.
-const GAME_VERSION = "2.134.1";
+const GAME_VERSION = "2.134.2";
 
 const canvas = document.getElementById("gameCanvas");
 if (!(canvas instanceof HTMLCanvasElement)) {
@@ -2544,11 +2544,12 @@ function hitUiRect(x, y) {
 }
 
 // Creates the sound system on first use; every later call wakes it up again if
-// it was suspended. It is first called as the game launches, so the intro is
-// heard at once wherever sound may play without a click (the Android app, an
-// installed app, a site allowed to play sound). Elsewhere the browser holds it
-// suspended until the first click or key press.
+// it was suspended. Nothing happens until the intro has loaded, so clicks or
+// keys on the intro don't bring the ambience in early. updateLoadingScreen
+// calls it at that point; where the browser holds sound back, the next click
+// or key press wakes it.
 function ensureAudio() {
+  if (!introReady) return false;
   if (!game.audioContext) {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx) return false;
@@ -10665,6 +10666,7 @@ function updateLoadingScreen(now, rawDt) {
   if (!introReady && (loadingSmoothFrames >= LOADING_SMOOTH_FRAMES || now > LOADING_MAX_MS)) {
     introReady = true;
     setLoadingStatus(readyStatus());
+    ensureAudio();
     playIntro(); // the music starts once the intro has loaded, not during loading
   }
   if (introReady && eulaAccepted && (introSkipped || now >= INTRO_MS)) document.body.classList.add("loaded");
@@ -11357,8 +11359,4 @@ game.settings = loadSettings();
 initStore();
 // Closing the page mid-voyage keeps the crew's experience.
 window.addEventListener("pagehide", crewFlush);
-// Start the sound with the intro. Where the browser holds it back, the first
-// key press or click wakes it (handleKeyDown / handlePointerInteraction call
-// ensureAudio).
-ensureAudio();
 requestAnimationFrame(tick);
