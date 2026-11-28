@@ -1,6 +1,6 @@
 // Shown in the Settings menu. Bump it with each release so players (and
 // bug reports) can tell which build is running.
-const GAME_VERSION = "2.87.1";
+const GAME_VERSION = "2.134.1";
 
 const canvas = document.getElementById("gameCanvas");
 if (!(canvas instanceof HTMLCanvasElement)) {
@@ -22,8 +22,8 @@ const HEIGHT = canvas.height;
 
 // The sea is bigger than the screen: cameras follow the ships around it.
 // WIDTH/HEIGHT stay the screen (HUD and menu layout); WORLD_W/WORLD_H are the sea.
-// The sea: 3 screens wide and 3 high (the hazard count per level stays the
-// same, so there is more open water to manoeuvre in).
+// The sea: 3 screens wide and 3 high, so there is plenty of open water to
+// manoeuvre in.
 const WORLD_SCALE = 3;
 const WORLD_W = WIDTH * WORLD_SCALE;
 const WORLD_H = HEIGHT * WORLD_SCALE;
@@ -37,17 +37,71 @@ const CAMERA_VIEW_NAMES = { overview: "Overview", chase: "Chase", bridge: "Bridg
 const GRAPHICS_MODES = ["auto", "advanced", "2d"];
 
 // Where a world point lands on this canvas. In 3D, `lift` raises the point
-// above the sea first (e.g. so a name sits over the mast, not the hull).
-function worldToScreen(x, y, lift = 0) {
-  if (view3d.active) return view3d.project(x, y, lift);
+// above the sea first (e.g. so a name sits over the mast, not the hull), and
+// `slot` picks that player's half of a split screen.
+function worldToScreen(x, y, lift = 0, slot) {
+  if (view3d.active) return view3d.project(x, y, lift, slot);
   return { x: (x - view2d.x) * view2d.scale + WIDTH / 2, y: (y - view2d.y) * view2d.scale + HEIGHT / 2, visible: true };
+}
+
+// Boxes already taken on this frame's 2D layer: labels move clear of them.
+let labelBoxes = [];
+
+// Where a w x h label wanted centred on `cx` with its top at `top` goes: wholly
+// on screen (in split screen: inside the half it belongs to) and clear of the
+// HUD panels and of the labels placed before it. The 3D view is wider than this
+// layer on wide screens, so an unclamped label would be sliced off at its edge.
+function placeLabel(cx, top, w, h) {
+  const split = view3d.active && view3d.split;
+  const minX = split && cx >= WIDTH / 2 ? WIDTH / 2 + 6 : 6;
+  const maxX = (split && cx < WIDTH / 2 ? WIDTH / 2 : WIDTH) - 6 - w;
+  const x = clamp(cx - w / 2, minX, Math.max(minX, maxX));
+  let at = x;
+  let y = clamp(top, 6, HEIGHT - h - 6);
+  for (let i = 0; i < 8; i += 1) {
+    const hit = labelBoxes.find((b) => at < b.x + b.w && at + w > b.x && y < b.y + b.h && y + h > b.y);
+    if (!hit) break;
+    // out of its way, towards the middle of the screen: beside something
+    // tall (a column of touch buttons), above or below anything else
+    if (hit.h > hit.w) at = hit.x + hit.w / 2 < WIDTH / 2 ? hit.x + hit.w + 3 : hit.x - w - 3;
+    else y = hit.y + hit.h / 2 < HEIGHT / 2 ? hit.y + hit.h + 3 : hit.y - h - 3;
+  }
+  const box = { x: at, y: clamp(y, 6, HEIGHT - h - 6), w, h };
+  labelBoxes.push(box);
+  return box;
+}
+
+// The HUD panels that labels keep out of while sailing.
+function reserveHudBoxes() {
+  labelBoxes = [];
+  if (gameState !== "playing" && gameState !== "arrival") return;
+  labelBoxes.push({ x: 8, y: 8, w: mode === "local" ? 496 : 370, h: 56 });
+  // Labels keep clear of the small map; an enlarged one simply lies over the view.
+  if (mapStep === 0) labelBoxes.push({ x: WIDTH - 232, y: HEIGHT - 140, w: 232, h: 140 });
+  labelBoxes.push({ x: WIDTH - 146, y: HEIGHT - 207, w: 146, h: 65 }); // the map's buttons
+  if (view3d.active && view3d.split) labelBoxes.push({ x: WIDTH / 2 - 180, y: 8, w: 360, h: 30 });
+  if (game.mission) labelBoxes.push(missionPanelRect());
+  if (TOUCH_UI) reserveTouchControls();
+}
+
+// The on-screen stick and buttons lie over this layer: labels avoid them too.
+const TOUCH_COVERS = document.querySelectorAll(".tc-stick, .tc-side, .tc-fire, .tc-play .tc-corner");
+function reserveTouchControls() {
+  const rect = canvas.getBoundingClientRect();
+  const k = Math.min(rect.width / WIDTH, rect.height / HEIGHT);
+  const left = rect.left + (rect.width - WIDTH * k) / 2;
+  const top = rect.top + (rect.height - HEIGHT * k) / 2;
+  for (const control of TOUCH_COVERS) {
+    const r = control.getBoundingClientRect();
+    if (r.width) labelBoxes.push({ x: (r.left - left) / k, y: (r.top - top) / k, w: r.width / k, h: r.height / k });
+  }
 }
 
 // What the cameras look at: your ship in single player; the middle of both
 // ships in 2-player, with `spanX/spanY` telling how far apart they are so the
 // camera can pull back to keep both in view. Menus look at the whole sea.
 function cameraFocus() {
-  const inWorld = gameState === "playing" || gameState === "levelTransition" || gameState === "ended";
+  const inWorld = gameState === "playing" || gameState === "arrival" || gameState === "ended";
   const p1 = game.player1;
   if (!inWorld || !p1) return { x: WORLD_W / 2, y: WORLD_H / 2, spanX: 0, spanY: 0, inWorld: false };
   const p2 = mode === "local" ? game.player2 : null;
@@ -60,7 +114,8 @@ function cameraFocus() {
 const view2d = { x: WIDTH / 2, y: HEIGHT / 2, scale: 1 };
 
 function updateView2d() {
-  const f = cameraFocus();
+  const moored = game.harbourShip;
+  const f = moored ? { x: moored.x, y: moored.y, spanX: 0, spanY: 0, inWorld: true } : cameraFocus();
   let scale = Math.min(1, WIDTH / (f.spanX + 500), HEIGHT / (f.spanY + 360));
   if (!f.inWorld) scale = Math.min(WIDTH / WORLD_W, HEIGHT / WORLD_H);
   const halfW = WIDTH / (2 * scale);
@@ -160,6 +215,18 @@ const HARBOUR_LAND = [HarbourA, HarbourB].flatMap((h) =>
   })
 );
 
+// Harbour B is never given away: no name label, map or chart mark, course or
+// bearing until a captain is near enough to see it.
+const HARBOUR_SIGHT = 800; // units (about 2.4 km)
+
+function harbourBInSight(ship) {
+  return !!ship && !ship.capsized && dist(ship, HarbourB) < HARBOUR_SIGHT;
+}
+
+function harbourBSighted() {
+  return humanShips().some(harbourBInSight);
+}
+
 // How far a point is from the nearest harbour land (negative = on land).
 function landClearance(x, y) {
   let best = Infinity;
@@ -172,39 +239,19 @@ function landClearance(x, y) {
   return best;
 }
 
-// Both start empty and are populated by buildHazardsForLevel() according to
-// that level's LEVEL_CONFIGS entry, so the obstacle count and mix grows as
-// the player advances through levels instead of staying at a fixed layout.
+// Both start empty and are filled by buildHazards(): at random for Free Play,
+// or from the mission's own map (missions.js).
 const hazards = [];
 const dynamicDangers = [];
 
-// One config per level (1-15): more/bigger islands, icebergs, volcanoes and
-// storms, plus higher enemy caps and shorter spawn intervals, as the level
-// number climbs. Level 16+ just keeps reusing the level-15 config.
-const LEVEL_CONFIGS = [
-  { islands: 2, icebergs: 1, volcanoes: 1, storms: 1, raiderCap: 1, raiderInterval: [10, 16], creatureCap: 2, creatureInterval: [9, 15], underwaterCap: 1, underwaterInterval: [14, 22], spoutDormant: [6, 12] },
-  { islands: 2, icebergs: 2, volcanoes: 1, storms: 1, raiderCap: 1, raiderInterval: [9, 15], creatureCap: 2, creatureInterval: [8, 14], underwaterCap: 1, underwaterInterval: [13, 20], spoutDormant: [6, 11] },
-  { islands: 3, icebergs: 2, volcanoes: 1, storms: 2, raiderCap: 2, raiderInterval: [9, 14], creatureCap: 3, creatureInterval: [8, 13], underwaterCap: 2, underwaterInterval: [12, 19], spoutDormant: [5, 10] },
-  { islands: 3, icebergs: 2, volcanoes: 2, storms: 2, raiderCap: 2, raiderInterval: [8, 13], creatureCap: 3, creatureInterval: [7, 12], underwaterCap: 2, underwaterInterval: [11, 18], spoutDormant: [5, 10] },
-  { islands: 3, icebergs: 3, volcanoes: 2, storms: 2, raiderCap: 2, raiderInterval: [8, 12], creatureCap: 4, creatureInterval: [7, 12], underwaterCap: 2, underwaterInterval: [10, 17], spoutDormant: [5, 9] },
-  { islands: 4, icebergs: 3, volcanoes: 2, storms: 3, raiderCap: 3, raiderInterval: [7, 12], creatureCap: 4, creatureInterval: [6, 11], underwaterCap: 3, underwaterInterval: [10, 16], spoutDormant: [4, 9] },
-  { islands: 4, icebergs: 3, volcanoes: 2, storms: 3, raiderCap: 3, raiderInterval: [7, 11], creatureCap: 4, creatureInterval: [6, 10], underwaterCap: 3, underwaterInterval: [9, 15], spoutDormant: [4, 8] },
-  { islands: 4, icebergs: 4, volcanoes: 3, storms: 3, raiderCap: 3, raiderInterval: [6, 11], creatureCap: 5, creatureInterval: [6, 10], underwaterCap: 3, underwaterInterval: [9, 14], spoutDormant: [4, 8] },
-  { islands: 5, icebergs: 4, volcanoes: 3, storms: 4, raiderCap: 4, raiderInterval: [6, 10], creatureCap: 5, creatureInterval: [5, 9], underwaterCap: 4, underwaterInterval: [8, 13], spoutDormant: [3, 7] },
-  { islands: 5, icebergs: 4, volcanoes: 3, storms: 4, raiderCap: 4, raiderInterval: [6, 9], creatureCap: 5, creatureInterval: [5, 9], underwaterCap: 4, underwaterInterval: [8, 12], spoutDormant: [3, 7] },
-  { islands: 5, icebergs: 5, volcanoes: 4, storms: 4, raiderCap: 4, raiderInterval: [5, 9], creatureCap: 6, creatureInterval: [5, 8], underwaterCap: 4, underwaterInterval: [7, 12], spoutDormant: [3, 6] },
-  { islands: 6, icebergs: 5, volcanoes: 4, storms: 5, raiderCap: 5, raiderInterval: [5, 8], creatureCap: 6, creatureInterval: [4, 8], underwaterCap: 5, underwaterInterval: [7, 11], spoutDormant: [3, 6] },
-  { islands: 6, icebergs: 5, volcanoes: 4, storms: 5, raiderCap: 5, raiderInterval: [5, 8], creatureCap: 6, creatureInterval: [4, 7], underwaterCap: 5, underwaterInterval: [6, 10], spoutDormant: [2, 6] },
-  { islands: 6, icebergs: 6, volcanoes: 5, storms: 5, raiderCap: 5, raiderInterval: [4, 7], creatureCap: 7, creatureInterval: [4, 7], underwaterCap: 5, underwaterInterval: [6, 10], spoutDormant: [2, 5] },
-  { islands: 7, icebergs: 6, volcanoes: 5, storms: 6, raiderCap: 6, raiderInterval: [4, 7], creatureCap: 7, creatureInterval: [3, 6], underwaterCap: 6, underwaterInterval: [5, 9], spoutDormant: [2, 5] }
-];
-
 // Threats (raiders, sea creatures, submarines, the water spout, the tsunami)
 // arrive one at a time: each new one waits until THREAT_GAP seconds after the
-// last, and every level opens with a calm spell.
+// last, and every voyage opens with a calm spell.
 const THREAT_GAP = 5;
 const BIG_EVENT_GAP = 9;
-const LEVEL_CALM_TIME = 8;
+const OPENING_CALM_TIME = 8;
+const TSUNAMI_GAP = [39, 61]; // s of calm before a tsunami
+const WHIRLPOOL_GAP = [31, 54]; // s of calm before a whirlpool
 
 function threatSlotOpen() {
   return game.elapsed >= (game.nextThreatAllowedAt || 0);
@@ -212,11 +259,6 @@ function threatSlotOpen() {
 
 function claimThreatSlot(gap = THREAT_GAP) {
   game.nextThreatAllowedAt = game.elapsed + gap;
-}
-
-function getLevelConfig(level) {
-  const idx = Math.max(0, Math.min((level || 1) - 1, LEVEL_CONFIGS.length - 1));
-  return LEVEL_CONFIGS[idx];
 }
 
 function randomInterval(range) {
@@ -269,6 +311,7 @@ function resetTempest() {
 }
 
 function updateTempestWeather(dt) {
+  if (!weatherAllowed("tempest")) return;
   if (tempest.state === "clear") {
     tempest.intensity = 0;
     tempest.timer -= dt;
@@ -375,10 +418,11 @@ function endWaterSpout() {
   waterSpout.state = "dormant";
   waterSpout.parent = null;
   waterSpout.cell = null;
-  waterSpout.timer = randomInterval(getLevelConfig(game.level).spoutDormant);
+  waterSpout.timer = randomInterval(voyageThreats().spoutDormant);
 }
 
 function updateWaterSpout(dt) {
+  if (!weatherAllowed("spout")) return;
   if (waterSpout.state === "dormant") {
     waterSpout.timer -= dt;
     if (waterSpout.timer <= 0) {
@@ -537,17 +581,12 @@ function tsunamiLee(x, y) {
   return lee;
 }
 
-function tsunamiDormantRange(level) {
-  const l = level || 1;
-  return [Math.max(18, 45 - 2 * l), Math.max(28, 70 - 3 * l)];
-}
-
-// A new round or level starts with the sea as the wind makes it: no swell,
-// rough water or tsunami wave left over from the level before (the 3D sea
+// A new voyage or crossing starts with the sea as the wind makes it: no swell,
+// rough water or tsunami wave left over from the one before (the 3D sea
 // keeps its own fading copy, cleared by view3d.resetSea).
 function resetSea() {
-  sea.roughness = clamp(windSea(), 0, 1);
-  sea.swell = 1;
+  sea.roughness = clamp(windSea(), 0, 1) * (game.mission ? game.mission.calm : 1);
+  sea.swell = game.mission ? game.mission.calm : 1;
   sea.sets = 1;
   sea.setsTarget = 1;
   sea.setTimer = 0;
@@ -556,7 +595,7 @@ function resetSea() {
 
 function resetTsunami() {
   tsunami.state = "dormant";
-  tsunami.timer = randomInterval(tsunamiDormantRange(game.level));
+  tsunami.timer = randomInterval(TSUNAMI_GAP);
 }
 
 function launchTsunami() {
@@ -580,6 +619,7 @@ function shipFacesTsunami(ship) {
 }
 
 function updateTsunami(dt) {
+  if (!weatherAllowed("tsunami")) return;
   if (tsunami.state === "dormant") {
     tsunami.timer -= dt;
     if (tsunami.timer <= 0) {
@@ -657,8 +697,8 @@ const whirlpool = {
   warned: new WeakSet()
 };
 
-const WHIRLPOOL_LIFE = 30;
-const WHIRLPOOL_FADE = 6;
+const WHIRLPOOL_LIFE = 34;
+const WHIRLPOOL_FADE = 10;
 const WHIRLPOOL_START_R = 45;
 const WHIRLPOOL_MAX_R = 210;
 const WHIRLPOOL_SPIN_SPEED = 150; // sideways current at full strength
@@ -666,18 +706,10 @@ const WHIRLPOOL_PULL_SPEED = 105; // current towards the centre at full strength
 const WHIRLPOOL_TURN = 1.3; // how fast it swings a ship's bow round (rad/s)
 const WHIRLPOOL_SINK_TIME = 1.4; // seconds in the throat before going under
 
-// Seconds of calm before the next whirlpool: 35-60 s on level 1, down to
-// 20-35 s on the later levels. The countdown runs on across levels (a new
-// level doesn't restart it), so quick levels still meet whirlpools.
-function whirlpoolDormantRange(level) {
-  const l = level || 1;
-  return [Math.max(20, 37 - 2 * l), Math.max(35, 63 - 3 * l)];
-}
-
 function resetWhirlpool() {
   whirlpool.state = "dormant";
   whirlpool.strength = 0;
-  whirlpool.timer = randomInterval(whirlpoolDormantRange(game.level));
+  whirlpool.timer = randomInterval(WHIRLPOOL_GAP);
 }
 
 // Open water, clear of land and harbours, not right under a ship.
@@ -689,7 +721,7 @@ function launchWhirlpool() {
     const p = { x, y };
     const clearOfLand = [...hazards, HarbourA, HarbourB].every((h) => dist(p, h) > (h.clear || h.danger || h.r) + WHIRLPOOL_MAX_R + 20);
     const clearOfShips = ships.every((s) => dist(p, s) > WHIRLPOOL_START_R + 120);
-    if (clearOfLand && clearOfShips) {
+    if (clearOfLand && clearOfShips && terrainDepth(x, y) > WHIRLPOOL_MAX_R * 0.8) {
       whirlpool.x = x;
       whirlpool.y = y;
       whirlpool.r = WHIRLPOOL_START_R;
@@ -714,6 +746,7 @@ function whirlpoolStrengthAt(age) {
 }
 
 function updateWhirlpool(dt) {
+  if (!weatherAllowed("whirlpool")) return;
   const wp = whirlpool;
   if (wp.state === "dormant") {
     wp.timer -= dt;
@@ -790,7 +823,7 @@ function drawWhirlpool() {
   ctx.fill();
   // Spiral foam arms turning with the current.
   const turn = game.elapsed * (0.6 + 2.4 * s) * wp.spin;
-  ctx.strokeStyle = `rgba(235, 248, 255, ${0.25 + 0.5 * s})`;
+  ctx.strokeStyle = `rgba(235, 248, 255, ${(0.25 + 0.5 * s) * Math.min(1, 3 * s)})`;
   ctx.lineWidth = 2.5;
   for (let arm = 0; arm < 3; arm++) {
     ctx.beginPath();
@@ -911,6 +944,15 @@ const SHIP_CATALOG = [
     stats: { maxSpeed: 194, accel: 136, hp: 96, turnRate: 2.0, windResistance: -0.08 }
   },
   {
+    id: "hospitallerCarrack",
+    name: "Hospitaller Carrack",
+    category: "Carrack",
+    color: "#a8744a",
+    cost: 300,
+    desc: "16th-century warship of the Knights Hospitaller: stout oak hull and cannon.",
+    stats: { maxSpeed: 188, accel: 122, hp: 170, turnRate: 1.1, windResistance: -0.04 }
+  },
+  {
     id: "catamaran",
     name: "Catamaran",
     category: "Catamaran",
@@ -983,15 +1025,38 @@ const SHIP_CATALOG = [
     stats: { maxSpeed: 195, accel: 124, hp: 195, turnRate: 0.86, windResistance: 0.3 }
   },
   {
+    id: "wartimeTanker",
+    name: "Wartime Tanker",
+    category: "WarTanker",
+    color: "#68727d",
+    cost: 340,
+    desc: "1943 armed tanker: deck guns fire ahead and astern. Takes heavy hits. Oil pump at anchor.",
+    stats: { maxSpeed: 172, accel: 108, hp: 220, turnRate: 0.8, windResistance: 0.22 }
+  },
+  {
     id: "tugBoat",
     name: "Tug Boat",
     category: "Tug",
-    color: "#e2a21b",
-    cost: 150,
+    color: "#ee4a16",
+    premiumPack: "specialistFleet",
     desc: "Small and very strong: takes other ships in tow on a rope (P1: T, P2: ').",
     stats: { maxSpeed: 190, accel: 230, hp: 120, turnRate: 1.9, windResistance: 0.1 }
   }
 ];
+
+// The Order's galley, oared, which tows the Hospitaller carrack in and out of
+// port. It is not bought or picked: in 2-player it is player 2's ship when
+// player 1 takes the carrack, otherwise the computer rows one out when called.
+const ORDER_GALLEY = {
+  id: "hospitallerGalley",
+  name: "Hospitaller Galley",
+  category: "Galley",
+  color: "#b3202a",
+  defaultOwned: true,
+  desc: "Oared galley of the Order: turns on the spot and takes great ships in tow.",
+  stats: { maxSpeed: 200, accel: 150, hp: 125, turnRate: 1.5, windResistance: 0.45 }
+};
+const TOWING_SHIPS = ["Tug", "Galley"]; // T / ' passes their tow rope
 
 // Hydrofoil: once fast enough the hull lifts clear of the water on its
 // foils ("foil-borne"): less drag and less wind drift, but the foils hit the
@@ -1008,7 +1073,7 @@ function updateFoilLift(ship) {
 // through them slowly and takes damage. The icebreaker takes none but crawls
 // while it breaks fresh ice, and leaves an open channel of loose ice behind
 // it that any ship can follow at a better speed. Channels stay open for the
-// rest of the level.
+// rest of the crossing.
 const ICE_BREAK_R = 24; // half-width of the channel the icebreaker opens
 const ICE_BREAK_STEP = 7; // a channel point every this many units
 const ICE_SPEED = { solid: 0.35, icebreaker: 0.22, channel: 0.75 }; // share of top speed
@@ -1039,7 +1104,7 @@ function iceAt(x, y) {
   return "solid";
 }
 
-// Polar run: when a player sails the icebreaker, the whole run is set in
+// Polar run: when a player sails the icebreaker in Free Play, the whole run is set in
 // the far south. Both harbours are locked in by fast ice outside their
 // breakwaters, there is more pack ice at sea and the land is under snow.
 function isPolarRun() {
@@ -1262,6 +1327,7 @@ function updateShipIce(ship, dt) {
     if (ship.ice) cap = ICE_SPEED[ship.ice];
   }
   if (cap === undefined) return;
+  cap = Math.min(1, cap * (1 + 0.8 * crewSkill(ship, "ice")));
   // The ice soaks up the engine's push and bleeds off any extra way, so
   // entering it slows the ship over a second or so and it can't go faster.
   const max = ship.maxSpeed * cap;
@@ -1273,7 +1339,7 @@ function updateShipIce(ship, dt) {
 // outright (a pirate's broadside, a cannonball) tears TANKER_HIT_SHARE of the
 // hull instead, and rocks, fire and lava (which take a share of the hull)
 // do less to them.
-const TANKERS = { Tanker: "oil", GasTanker: "gas" };
+const TANKERS = { Tanker: "oil", GasTanker: "gas", WarTanker: "oil" };
 const TANKER_HIT_SHARE = 0.55;
 const TANKER_SHARE_DAMAGE = 0.65;
 
@@ -1319,7 +1385,7 @@ function shipLabel(ship) {
   return ship.playerName || ship.shipName || "ship";
 }
 
-// Two tug popups (2-player, local). At the start of a level, a tug captain with
+// Two tug popups (2-player, local). At the start of a voyage, a tug captain with
 // a large ship berthed alongside is asked whether to pull it out of the
 // harbour. After a tow, once the tug is back, moored at a berth, its captain
 // is asked whether to change ship to carry on; yes opens the ship choice, no
@@ -1333,7 +1399,8 @@ function openTugOffer(kind, slot) {
 function offerTugPull() {
   if (mode !== "local") return;
   for (const [slot, tug, big] of [["p1", game.player1, game.player2], ["p2", game.player2, game.player1]]) {
-    if (!tug || !big || tug.capsized || big.capsized || tug.category !== "Tug" || !THRUSTER_SHIPS.includes(big.category)) continue;
+    const wants = tug?.category === "Galley" ? big?.category === "Carrack" : tug?.category === "Tug" && THRUSTER_SHIPS.includes(big?.category);
+    if (!tug || !big || tug.capsized || big.capsized || !wants) continue;
     if (tug.berth && big.berth && tug.berth.h === big.berth.h) {
       openTugOffer("pull", slot);
       return;
@@ -1344,7 +1411,7 @@ function offerTugPull() {
 function offerShipChange() {
   if (mode !== "local" || game.tugOffer || game.midGameChange) return;
   for (const tug of humanShips()) {
-    if (tug.category !== "Tug" || !tug.didTow || tug.tow || tug.capsized || !tug.anchored || !tug.berth || tug.ropes < 1) continue;
+    if (!TOWING_SHIPS.includes(tug.category) || !tug.didTow || tug.tow || tug.capsized || !tug.anchored || !tug.berth || tug.ropes < 1) continue;
     tug.didTow = false;
     openTugOffer("change", tug.playerSlot);
     return;
@@ -1413,8 +1480,8 @@ function drawTugOffer() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = "rgba(2, 10, 18, 0.6)";
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
-  const w = 620;
-  const h = 230;
+  const w = 700;
+  const h = 270;
   const x = (WIDTH - w) / 2;
   const y = (HEIGHT - h) / 2;
   ctx.fillStyle = "rgba(9, 26, 40, 0.97)";
@@ -1424,21 +1491,21 @@ function drawTugOffer() {
   ctx.strokeRect(x, y, w, h);
   ctx.textAlign = "center";
   ctx.fillStyle = "#e9f8ff";
-  ctx.font = "28px Segoe UI";
+  ctx.font = "bold 32px Segoe UI";
   ctx.fillText(pull ? "Pull the large ship out?" : "Change ship?", WIDTH / 2, y + 48);
-  ctx.font = "17px Segoe UI";
+  ctx.font = "20px Segoe UI";
   ctx.fillStyle = "#a9cbe0";
   const who = tug.playerName || "Captain";
   ctx.fillText(
-    pull ? `${who}: the ${big.shipName} is berthed in the harbour.` : `${who}: the tow is done and the tug is back at its berth.`,
+    pull ? `${who}: the ${big.shipName} is berthed in the harbour.` : `${who}: the tow is done and the ${tug.category === "Tug" ? "tug" : "galley"} is back at its berth.`,
     WIDTH / 2, y + 84);
   ctx.fillText(pull ? "Take it in tow and pull it out to sea?" : "Pick another ship to continue the adventure?", WIDTH / 2, y + 108);
   const labels = pull ? ["Yes, take it in tow", "No, stay berthed"] : ["Yes, choose a ship", "No, stay berthed"];
   labels.forEach((label, i) => {
-    const bw = 250;
-    const bh = 48;
-    const bx = WIDTH / 2 - bw - 12 + i * (bw + 24);
-    const by = y + 134;
+    const bw = 300;
+    const bh = 82;
+    const bx = WIDTH / 2 - bw - 14 + i * (bw + 28);
+    const by = y + 136;
     const selected = box.choice === i;
     ctx.fillStyle = i === 0 ? "rgba(24, 92, 70, 0.92)" : "rgba(110, 40, 34, 0.92)";
     ctx.fillRect(bx, by, bw, bh);
@@ -1446,13 +1513,13 @@ function drawTugOffer() {
     ctx.lineWidth = selected ? 3 : 1.5;
     ctx.strokeRect(bx, by, bw, bh);
     ctx.fillStyle = "#f3fbff";
-    ctx.font = "19px Segoe UI";
-    ctx.fillText(label, bx + bw / 2, by + 30);
+    ctx.font = "bold 24px Segoe UI";
+    ctx.fillText(label, bx + bw / 2, by + 50);
     registerUiRect(bx, by, bw, bh, () => closeTugOffer(i === 0));
   });
   ctx.font = "14px Segoe UI";
   ctx.fillStyle = "#8fb4c8";
-  ctx.fillText("Y / N or arrow keys and Enter", WIDTH / 2, y + h - 14);
+  if (!TOUCH_UI) ctx.fillText("Y / N or arrow keys and Enter", WIDTH / 2, y + h - 14);
   ctx.restore();
 }
 
@@ -1466,6 +1533,7 @@ function confirmShipChange() {
     setUiMessage(`${profile.name} has not unlocked ${shipDef.name}`);
     return;
   }
+  if (crewRequired(slot, shipDef.id)) return;
   const old = slot === "p2" ? game.player2 : game.player1;
   const fresh = newShip(old.type, old.x, old.y, old.angle);
   applyShipDefinition(fresh, shipDef);
@@ -1489,14 +1557,21 @@ function cancelShipSelect() {
     game.midGameChange = null;
     gameState = "playing";
     keys.clear();
+  } else if (game.voyage) {
+    openMissions();
   } else {
-    gameState = "menu";
+    openVoyageChoice();
   }
 }
 
 function toggleTow(slot) {
   const tug = slot === "p2" ? game.player2 : game.player1;
-  if (!tug || tug.capsized || tug.category !== "Tug") return;
+  if (!tug || tug.capsized) return;
+  if (tug.category === "Carrack") {
+    callGalley(tug);
+    return;
+  }
+  if (!TOWING_SHIPS.includes(tug.category)) return;
   if (tug.tow) {
     setUiMessage(`${shipLabel(tug)} cast off the tow`);
     tug.tow = null;
@@ -1544,7 +1619,8 @@ function updateTows(dt) {
     tug.towTaut = stretch > 0;
     if (!tug.towTaut) continue;
     // Each end gives way by its share of the weight on the rope.
-    const towShare = TUG_PULL / (TUG_PULL + bumpBody(tow).mass);
+    const pull = TUG_PULL * (1 + crewSkill(tug, "tow"));
+    const towShare = pull / (pull + bumpBody(tow).mass);
     const ux = dx / d;
     const uy = dy / d;
     tow.x -= ux * stretch * towShare;
@@ -1552,6 +1628,433 @@ function updateTows(dt) {
     tug.x += ux * stretch * (1 - towShare);
     tug.y += uy * stretch * (1 - towShare);
     tow.angle += normalizeAngle(Math.atan2(-uy, -ux) - tow.angle) * Math.min(1, dt * 1.2);
+  }
+}
+
+// ---- The carrack in port ----------------------------------------------------
+// A great carrack could not work her way in or out of port under sail: oared
+// boats pulled her. In harbour waters her sails give her nothing; a galley has
+// to take her in tow, outward from Harbour A and inward at Harbour B. Player
+// 2's galley does it when there is one at hand; otherwise the captain calls
+// (the Tow key) and the computer's galley rows out.
+const PORT_WATERS = 400; // this close to a harbour's corner (both ways) she is in port
+const PORT_BERTHED = 300; // towed in this far, she is warped to her berth
+const GALLEY_SPEED = { meet: 32, tow: 26, home: 28 }; // units/s at a steady stroke
+const GALLEY_CHECK = 5; // units/s lost each second easing down to a stop
+const GALLEY_ROPE_TIME = 3; // s to pass the tow rope before the oars take the strain
+const GALLEY_TOW_TURN = 0.35; // rad/s, the fastest the rope swings the carrack's head round
+const GALLEY_TURN = Math.PI / 12; // the course is plotted in 15 degree turns...
+const GALLEY_RUN = 17; // ...each over this far: a turning circle a little wider than her own length
+const GALLEY_PIVOT = 24; // turning on her oars on the spot takes as long as rowing this far (per 15 degrees)
+const GALLEY_CLEAR = 10; // the least water between her hull (the oars reach out) and anything
+const GALLEY_ROOM = 30; // and the extra she keeps when there is space for it
+const GALLEY_SHIP_GAP = 7; // she stops rather than close nearer than this on a ship in her way
+const GALLEY_SEARCH = 20000; // positions tried before giving up on a course
+const GALLEY_ENTRANCE = 265; // both ways: the middle of the gap between the breakwaters
+const GALLEY_AT_HAND = 600; // a player's galley this near does the towing itself
+const GALLEY_TOWING_SPEED = 62; // a player's galley with a great ship on the rope
+
+function inHarbourTerms(h, p) {
+  return { a: (p.x - h.corner.x) * h.sa, b: (p.y - h.corner.y) * h.sb };
+}
+
+function carrackPort(ship) {
+  if (!ship || ship.category !== "Carrack") return null;
+  // Harbour A holds her only until she has first got clear (a gust must not put her back in its power).
+  return [HarbourA, HarbourB].find((h) => {
+    const { a, b } = inHarbourTerms(h, ship);
+    return !(h === HarbourA && ship.leftA) && a < PORT_WATERS && b < PORT_WATERS;
+  }) || null;
+}
+
+function underTow(ship) {
+  return humanShips().some((s) => s.tow === ship) || (!!game.galley && game.galley.boat.tow === ship);
+}
+
+function playerGalleyAtHand(ship) {
+  return humanShips().find((s) => s !== ship && s.category === "Galley" && !s.capsized && dist(s, ship) < GALLEY_AT_HAND) || null;
+}
+
+function callGalley(ship) {
+  const slot = ship.playerSlot;
+  const h = carrackPort(ship);
+  let no = "";
+  if (!h) no = "the galley only comes out in harbour waters";
+  else if (ship.anchored || ship.ropes > 0) no = "weigh anchor and let the lines go first";
+  else if (underTow(ship)) no = "she is already in tow";
+  else if (playerGalleyAtHand(ship)) no = `${shipLabel(playerGalleyAtHand(ship))}'s galley is at hand: let them pass the rope`;
+  else if (game.galley && game.galley.phase !== "rest") no = "the galley is busy, wait for it";
+  if (no) {
+    setUiMessage(`${shipLabel(ship)}: ${no}`, slot);
+    return;
+  }
+  const inbound = h === HarbourB;
+  const own = inHarbourTerms(h, ship);
+  // Places for a carrack on the a side of the basin, mirrored for the other.
+  const nearA = own.a <= own.b;
+  const at = (a, b) => (nearA ? harbourPoint(h, a, b) : harbourPoint(h, b, a));
+  const out = Math.atan2(h.sb, h.sa); // heading out through the entrance
+  const middle = (d, angle) => ({ ...harbourPoint(h, d, d), angle });
+  // Where the galley rows with her in tow.
+  const legs = [];
+  if (!inbound) {
+    if ((own.a + own.b) / 2 < GALLEY_ENTRANCE - 75) legs.push(middle(GALLEY_ENTRANCE, out)); // unless the galley would lie past it
+    legs.push(middle(600, out));
+  } else {
+    if (Math.max(own.a, own.b) > BASIN) { // still outside the breakwaters
+      if (Math.min(own.a, own.b) < 250) legs.push(middle(460, out + Math.PI)); // off to one side: round by the entrance
+      legs.push(middle(GALLEY_ENTRANCE, out + Math.PI));
+    }
+    legs.push(at(150, 180));
+  }
+  // The galley's station is along the other quay. Waiting there, she gets under
+  // way from it; otherwise she comes in from the sea to take a carrack out, or
+  // puts out from the station to bring one in.
+  const station = { ...at(250, 42), angle: nearA ? Math.atan2(0, h.sa) : Math.atan2(h.sb, 0) };
+  const waiting = game.galley && game.galley.h === h ? game.galley.boat : null;
+  const start = waiting || (inbound ? station : middle(520, out + Math.PI));
+  const boat = waiting || newShip("cruise", start.x, start.y, start.angle);
+  if (!waiting) applyShipDefinition(boat, ORDER_GALLEY);
+  const way = waiting || inbound ? 0 : GALLEY_SPEED.meet * 0.7;
+  const g = { boat, target: ship, phase: "meet", h, inbound, legs, station, way, blocked: 0 };
+  if (!seekCarrack(g)) {
+    setUiMessage(`${shipLabel(ship)}: the galley can't find a clear way to you`, slot);
+    return;
+  }
+  game.galley = g;
+  setUiMessage(`${shipLabel(ship)} calls the Order's galley - it is on its way`, slot);
+  playShipHorn();
+}
+
+// A capsule with its middle and overall reach worked out, to pass over far ones quickly.
+function galleyKeepOff(p) {
+  return { ax: p.ax, ay: p.ay, bx: p.bx, by: p.by, r: p.r, mx: (p.ax + p.bx) / 2, my: (p.ay + p.by) / 2, reach: Math.hypot(p.bx - p.ax, p.by - p.ay) / 2 + p.r };
+}
+
+// Everything the galley must keep off in a harbour's waters.
+function galleyObstacles(h) {
+  return [
+    ...HARBOUR_LAND.filter((p) => p.harbour === h),
+    ...hazards.map((z) => ({ ax: z.x, ay: z.y, bx: z.x + 0.1, by: z.y, r: z.r })),
+    ...seaShips().map(hullSegment)
+  ].map(galleyKeepOff);
+}
+
+// The water round a galley lying at `pose`: the gap from her hull to the nearest of them.
+function galleyRoom(obstacles, pose) {
+  const hull = hullSegment({ x: pose.x, y: pose.y, angle: pose.angle, category: "Galley", maxHull: 0 });
+  const halfLength = BUMP_SHAPE.Galley.h + hull.r;
+  let room = GALLEY_CLEAR + GALLEY_ROOM; // further off makes no difference
+  for (const p of obstacles) {
+    const far = room + p.reach + halfLength;
+    if ((pose.x - p.mx) ** 2 + (pose.y - p.my) ** 2 >= far * far) continue;
+    const c = closestOnSegments(hull, p);
+    room = Math.min(room, Math.hypot(c.px - c.qx, c.py - c.qy) - hull.r - p.r);
+  }
+  return room;
+}
+
+// A course she can really row from `from` to `goal` (any heading if it has no
+// angle): straight runs and wide turns, turning on her oars only if `pivot`,
+// and clear of everything (an A* search over where she is and how she heads).
+// Returns the poses after `from`, or null if there is no way.
+function planGalley(h, from, goal, pivot) {
+  const obstacles = galleyObstacles(h);
+  const moves = [[0, GALLEY_RUN], [-1, GALLEY_RUN], [1, GALLEY_RUN]];
+  if (pivot) moves.push([-1, 0], [1, 0]);
+  const queue = []; // positions to try, in buckets by estimated course length
+  const reached = new Map();
+  let head = 0;
+  const add = (node) => {
+    const turns = ((Math.round(node.angle / GALLEY_TURN) % 24) + 24) % 24;
+    const key = `${Math.round(node.x / 14)},${Math.round(node.y / 14)},${turns}`;
+    if (reached.get(key) <= node.cost) return;
+    reached.set(key, node.cost);
+    const swing = goal.angle === undefined ? 0 : (Math.abs(normalizeAngle(goal.angle - node.angle)) * GALLEY_RUN) / GALLEY_TURN; // rowing it takes to come round
+    const rank = Math.floor((node.cost + 2 * Math.max(dist(node, goal), swing)) / 8); // leans towards the goal: quicker to find
+    (queue[rank] || (queue[rank] = [])).push(node);
+    head = Math.min(head, rank);
+  };
+  add({ x: from.x, y: from.y, angle: from.angle, turn: 0, cost: 0, room: galleyRoom(obstacles, from), prev: null });
+  for (let tried = 0; tried < GALLEY_SEARCH && head < queue.length; ) {
+    const node = queue[head] && queue[head].pop();
+    if (!node) {
+      head++;
+      continue;
+    }
+    tried++;
+    const facing = goal.angle === undefined || Math.abs(normalizeAngle(goal.angle - node.angle)) <= GALLEY_TURN * 2.01;
+    if (facing && dist(node, goal) < 16) {
+      const path = [{ x: goal.x, y: goal.y, angle: goal.angle === undefined ? node.angle : goal.angle }];
+      for (let p = node; p.prev; p = p.prev) path.unshift(p);
+      return path;
+    }
+    for (const [turn, run] of moves) {
+      const mid = node.angle + (turn * GALLEY_TURN) / 2;
+      const next = { x: node.x + Math.cos(mid) * run, y: node.y + Math.sin(mid) * run, angle: node.angle + turn * GALLEY_TURN, turn, prev: node };
+      next.room = galleyRoom(obstacles, next);
+      if (next.room < GALLEY_CLEAR && next.room <= node.room) continue; // only ever away from a tight spot
+      const length = run ? run * (turn ? 1.12 : 1) : 2 * GALLEY_PIVOT;
+      const wriggle = turn === node.turn ? 0 : 4; // one sweeping turn, not a weaving course
+      next.cost = node.cost + wriggle + length * (1 + (2 * (GALLEY_CLEAR + GALLEY_ROOM - Math.max(next.room, GALLEY_CLEAR))) / GALLEY_ROOM);
+      add(next);
+    }
+  }
+  return null;
+}
+
+// Plots the galley's course through `goals` in turn. False if there is no clear way.
+function plotGalley(g, goals, pivot) {
+  const course = [{ x: g.boat.x, y: g.boat.y, angle: g.boat.angle }];
+  for (const goal of goals) {
+    const from = course[course.length - 1];
+    const leg = planGalley(g.h, from, goal, pivot) || (!pivot && planGalley(g.h, from, goal, true));
+    if (!leg) return false;
+    course.push(...leg);
+  }
+  Object.assign(g, { course, goals, leg: 0, along: 0 });
+  return true;
+}
+
+// The course to lie just ahead of the carrack, stern to her, ready to pass the
+// rope: towards her first mark, or as near that line as there is water for.
+function seekCarrack(g) {
+  const { target, boat } = g;
+  g.sought = { x: target.x, y: target.y };
+  const gap = shipHalfLength(target) + shipHalfLength(boat) + TOW_SLACK;
+  const want = Math.atan2(g.legs[0].y - target.y, g.legs[0].x - target.x);
+  const obstacles = galleyObstacles(g.h);
+  for (let k = 0, tries = 0; k <= 24 && tries < 3; k++) {
+    const angle = want + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * GALLEY_TURN;
+    const pose = { x: target.x + Math.cos(angle) * gap, y: target.y + Math.sin(angle) * gap, angle };
+    if (galleyRoom(obstacles, pose) < GALLEY_CLEAR + 4) continue;
+    if (plotGalley(g, [pose], true)) return true;
+    tries++;
+  }
+  return false;
+}
+
+function sendGalleyHome(g) {
+  g.phase = "home";
+  g.boat.tow = null;
+  if (!plotGalley(g, [g.station], true)) game.galley = null;
+}
+
+// One step along the plotted course: she gathers way slowly and eases down for
+// the end. True when she is there.
+function rowGalley(g, dt) {
+  const { boat, course } = g;
+  // A step takes its distance to row, or longer if the turn in it is sharp (slowest turning on her oars).
+  const length = (i) => {
+    const run = dist(course[i], course[i + 1]);
+    const turns = Math.abs(normalizeAngle(course[i + 1].angle - course[i].angle)) / GALLEY_TURN;
+    return Math.max(0.01, run, turns * (run < 1 ? GALLEY_PIVOT : 0.8 * GALLEY_RUN));
+  };
+  let left = -g.along;
+  for (let i = g.leg; i < course.length - 1; i++) left += length(i);
+  const gather = g.phase === "tow" ? 3 : 6; // units/s each second: heavier with a great ship astern
+  g.way = Math.min(GALLEY_SPEED[g.phase], g.way + gather * dt, Math.sqrt(2 * GALLEY_CHECK * Math.max(0, left)) + 3);
+  let leg = g.leg;
+  let along = g.along + g.way * dt;
+  while (leg < course.length - 1 && along >= length(leg)) {
+    along -= length(leg);
+    leg++;
+  }
+  const there = leg >= course.length - 1;
+  const a = course[leg];
+  const b = there ? a : course[leg + 1];
+  const k = there ? 0 : along / length(leg);
+  const pose = { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, angle: a.angle + normalizeAngle(b.angle - a.angle) * k };
+  // Never into a ship that has got in the way: stop, and if it stays there, go round.
+  const ships = seaShips().map(hullSegment).map(galleyKeepOff);
+  const room = galleyRoom(ships, pose);
+  if (room < GALLEY_SHIP_GAP && room < galleyRoom(ships, boat)) {
+    g.way = 0;
+    boat.speed = 0;
+    g.blocked += dt;
+    if (g.blocked > 3) {
+      g.blocked = 0;
+      plotGalley(g, g.goals.slice(-1), true);
+    }
+    return false;
+  }
+  g.blocked = 0;
+  g.leg = leg;
+  g.along = along;
+  Object.assign(boat, pose);
+  boat.speed = there ? 0 : g.way;
+  return there;
+}
+
+// The carrack getting clear of Harbour A, and a player's galley bringing her in at B.
+function updateCarracks() {
+  for (const ship of humanShips()) {
+    if (ship.category !== "Carrack" || ship.capsized) continue;
+    const tug = humanShips().find((s) => s.tow === ship);
+    if (!ship.leftA && !carrackPort(ship)) {
+      ship.leftA = true;
+      if (tug) setUiMessage(`${shipLabel(ship)} is clear of the harbour - ${TOW_KEY_NAMES[tug.playerSlot]} to cast off`, tug.playerSlot);
+    }
+    const { a, b } = inHarbourTerms(HarbourB, ship);
+    if (tug && !ship.anchored && a < PORT_BERTHED && b < PORT_BERTHED) {
+      tug.tow = null;
+      dropAnchor(ship); // warped the last stretch to her berth
+    }
+  }
+}
+
+function updateGalley(dt) {
+  updateCarracks();
+  const g = game.galley;
+  if (!g || g.phase === "rest") return;
+  const { boat, target } = g;
+  // A player's galley got there first, or she sank or anchored: this one goes home.
+  if (g.phase !== "home" && (target.capsized || target.anchored || humanShips().some((s) => s.tow === target))) {
+    sendGalleyHome(g);
+    return;
+  }
+  if (g.phase === "meet") {
+    if (dist(target, g.sought) > 20) seekCarrack(g); // she has drifted: row for where she is now
+    if (rowGalley(g, dt)) {
+      g.phase = "rope";
+      g.wait = GALLEY_ROPE_TIME;
+    }
+  } else if (g.phase === "rope") {
+    g.wait -= dt;
+    if (g.wait > 0) return;
+    g.phase = "tow";
+    g.way = 0;
+    boat.tow = target;
+    boat.towLength = dist(boat, target);
+    if (plotGalley(g, g.legs, false)) setUiMessage(`The galley has ${shipLabel(target)} in tow`, target.playerSlot);
+    else sendGalleyHome(g);
+  } else if (g.phase === "tow") {
+    const there = rowGalley(g, dt);
+    const d = dist(boat, target) || 1;
+    const stretch = d - boat.towLength;
+    boat.towTaut = stretch > 0;
+    if (stretch > 0) {
+      const ux = (boat.x - target.x) / d;
+      const uy = (boat.y - target.y) / d;
+      target.x += ux * stretch;
+      target.y += uy * stretch;
+      const swing = normalizeAngle(Math.atan2(uy, ux) - target.angle);
+      target.angle += clamp(swing, -GALLEY_TOW_TURN * dt, GALLEY_TOW_TURN * dt);
+    }
+    const { a, b } = inHarbourTerms(g.h, target);
+    const done = g.inbound ? a < PORT_BERTHED && b < PORT_BERTHED : !carrackPort(target);
+    if (done) {
+      if (g.inbound) dropAnchor(target); // warped the last stretch to her berth
+      else {
+        target.leftA = true; // free from this moment: a gust must not put her back in port before she is next checked
+        setUiMessage(`${shipLabel(target)} is clear of the harbour - the galley casts off. Fair winds!`, target.playerSlot);
+      }
+    }
+    if (done || there) sendGalleyHome(g);
+  } else if (rowGalley(g, dt)) {
+    g.phase = "rest"; // lies at her station until she is called again
+  }
+}
+
+// What a carrack captain in port should do next, in that player's half.
+function drawTowPrompts() {
+  if (gameState !== "playing") return;
+  const split = view3d.active && view3d.split;
+  for (const ship of humanShips()) {
+    const h = carrackPort(ship);
+    if (!h || ship.capsized || ship.anchored || ship.ropes > 0) continue;
+    const p2 = ship.playerSlot === "p2";
+    const cx = split ? (p2 ? (WIDTH * 3) / 4 : WIDTH / 4) : WIDTH / 2;
+    const cy = HEIGHT - 150 - (!split && p2 ? 70 : 0);
+    const w = split ? WIDTH / 2 - 60 : 620;
+    const way = h === HarbourB ? "in" : "out";
+    const friend = playerGalleyAtHand(ship);
+    const towed = underTow(ship);
+    const coming = !!game.galley && game.galley.target === ship && ["meet", "rope"].includes(game.galley.phase);
+    const title = towed ? `UNDER TOW - THE GALLEY IS PULLING YOU ${way.toUpperCase()}`
+      : coming ? "THE GALLEY IS ROWING OUT TO YOU"
+      : `IN PORT THE CARRACK CANNOT SAIL - SHE MUST BE TOWED ${way.toUpperCase()}`;
+    const how = towed ? "Her sails fill again once she is clear of the harbour"
+      : coming ? "Stand by to take the tow rope"
+      : friend ? `${shipLabel(friend)}: row close and press ${TOW_KEY_NAMES[friend.playerSlot]} to pass the rope`
+      : TOUCH_UI ? "Tap Tow to call the Order's galley" : `Press ${TOW_KEY_NAMES[ship.playerSlot]} to call the Order's galley`;
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(74, 20, 22, 0.86)";
+    ctx.fillRect(cx - w / 2, cy - 32, w, 64);
+    ctx.strokeStyle = "rgba(255, 214, 170, 0.85)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(cx - w / 2, cy - 32, w, 64);
+    ctx.fillStyle = "#fff0e0";
+    ctx.font = "bold 18px Segoe UI";
+    ctx.fillText(title, cx, cy - 6);
+    ctx.font = "15px Segoe UI";
+    ctx.fillStyle = "#ffd9a8";
+    ctx.fillText(how, cx, cy + 20);
+    ctx.restore();
+  }
+}
+
+// ---- The carrack under sail -------------------------------------------------
+// Clear of the harbour she goes only as the wind will drive her. Her square
+// sails give nothing closer than about six points to the wind (they are taken
+// aback), most with the wind on the quarter, and little in light airs. The
+// forward key sets the sails; the captain is warned when the wind won't serve.
+const CARRACK_NO_WIND = 5; // wind (units) that no longer fills her sails
+const CARRACK_LIGHT_WIND = 13; // below this (about 8 knots) there isn't wind enough
+const CARRACK_FULL_WIND = 18; // and from here (about 11 knots) she has all she needs
+const CARRACK_CLOSEST = 65; // degrees off the wind: nearer than this she is aback
+const CARRACK_GHOSTING = 0.1; // the least drive: she still creeps, so no calm traps her
+
+function carrackWind(ship) {
+  const speed = Math.hypot(game.wind.x, game.wind.y);
+  const rel = normalizeAngle(Math.atan2(-game.wind.y, -game.wind.x) - ship.angle); // where it comes from, + to starboard
+  const off = Math.abs((rel * 180) / Math.PI);
+  const strength = clamp((speed - CARRACK_NO_WIND) / (CARRACK_FULL_WIND - CARRACK_NO_WIND), 0, 1);
+  const point = off < CARRACK_CLOSEST ? 0
+    : off < 90 ? 0.35 + (0.4 * (off - CARRACK_CLOSEST)) / (90 - CARRACK_CLOSEST)
+    : off < 135 ? 0.75 + (0.25 * (off - 90)) / 45
+    : 1 - (0.1 * (off - 135)) / 45;
+  return {
+    power: Math.max(CARRACK_GHOSTING, strength * point),
+    light: speed < CARRACK_LIGHT_WIND,
+    aback: off < CARRACK_CLOSEST,
+    bearAway: rel > 0 ? "port" : "starboard",
+    knots: speed * WIND_KNOTS_PER_UNIT
+  };
+}
+
+// The warning across that player's half while the wind won't serve her.
+function drawWindAlerts() {
+  if (gameState !== "playing") return;
+  const split = view3d.active && view3d.split;
+  for (const ship of humanShips()) {
+    if (ship.category !== "Carrack" || ship.capsized || ship.anchored || ship.ropes > 0 || carrackPort(ship) || underTow(ship)) continue;
+    const wind = carrackWind(ship);
+    if (!wind.light && !wind.aback) continue;
+    const p2 = ship.playerSlot === "p2";
+    const cx = split ? (p2 ? (WIDTH * 3) / 4 : WIDTH / 4) : WIDTH / 2;
+    const cy = HEIGHT - 150 - (!split && p2 ? 70 : 0);
+    const w = split ? WIDTH / 2 - 60 : 620;
+    const turn = ship.playerSlot + (wind.bearAway === "port" ? "Left" : "Right");
+    const key = TOUCH_UI ? "" : ` (${keyName(game.settings.keybinds[turn])})`;
+    const title = wind.light ? `NOT ENOUGH WIND - ${wind.knots.toFixed(0)} KNOTS` : "TOO CLOSE TO THE WIND - HER SAILS ARE ABACK";
+    const how = wind.aback ? `Bear away to ${wind.bearAway}${key} until the sails fill`
+      : "She will make little way: keep the wind astern until it freshens";
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(92, 62, 8, 0.86)";
+    ctx.fillRect(cx - w / 2, cy - 32, w, 64);
+    ctx.strokeStyle = `rgba(255, 214, 120, ${0.65 + 0.35 * Math.sin(performance.now() / 230)})`;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(cx - w / 2, cy - 32, w, 64);
+    ctx.fillStyle = "#fff4d8";
+    ctx.font = "bold 18px Segoe UI";
+    ctx.fillText(title, cx, cy - 6);
+    ctx.font = "15px Segoe UI";
+    ctx.fillStyle = "#ffe2a8";
+    ctx.fillText(how, cx, cy + 20);
+    ctx.restore();
   }
 }
 
@@ -1563,11 +2066,14 @@ const SHOP_ITEMS = [
   { id: "sonicWeapon", name: "Sonic Weapon", cost: 140, desc: "Fires a fast sonic pulse: longer range and faster reload than the cannon." },
   { id: "waterCannon", name: "Water Cannon", cost: 120, desc: "Reduces continuous hazard damage." },
   { id: "missileLauncher", name: "Advanced Missile Launcher", cost: 340, desc: "Auto-tracks nearby threats with kill missiles." },
-  { id: "reinforcedHull", name: "Reinforced Hull", cost: 170, desc: "Extra hull points at round start." },
+  { id: "reinforcedHull", name: "Reinforced Hull", cost: 170, desc: "Extra hull points when you set sail." },
   { id: "windKeel", name: "Wind Stabilizer Keel", cost: 130, desc: "Reduces wind drift effects." },
   { id: "turboProp", name: "Turbo Propeller", cost: 160, desc: "Higher top speed and acceleration." },
   { id: "fireFighting", name: "Fire Fighting Equipment", cost: 180, desc: "Put out a ship fire from volcano rocks at once (P1: F, P2: .)." },
   { id: "acousticDeterrent", name: "Acoustic Deterrent", cost: 150, desc: "Blasts a painful high-pitched tone at nearby pirates (P1: G, P2: ;). Each pirate decides: break off or press ahead." },
+  { id: "chartPlotter", name: "Chart Plotter", cost: 190, desc: "Crew equipment: your Navigating Officer keeps your track, and marks the way in once Harbour B is sighted." },
+  { id: "radar", name: "Surface Radar", cost: 210, desc: "Crew equipment: your Lookout sees further and marks sea monsters and submarines on the map." },
+  { id: "weatherStation", name: "Weather Station", cost: 160, desc: "Crew equipment: your Navigating Officer forecasts storms, whirlpools and the tsunami heading." },
   { id: "leviathanDecoy", name: "Leviathan Decoy Drones", cost: 420, desc: "Distracts sea creatures for short bursts.", premiumPack: "specialistArsenal" },
   { id: "tempestScrambler", name: "Tempest Scrambler", cost: 390, desc: "Steadies your ship in storm seas: the waves push it about half as much.", premiumPack: "specialistArsenal" }
 ];
@@ -1620,8 +2126,9 @@ const game = {
   profiles: createDefaultProfiles(),
   roundCommitted: false,
   gamePoints: { p1: 0, p2: 0 },
+  harbourShip: null, // player 1's last used ship, moored in the harbour behind the menus
   shopIndex: 0,
-  dock: null, // the dockyard (shop): { start, hideUi }
+  dock: null, // the dockyard (gameState "shop"): { start, hideUi }
   shopIndexBySlot: { p1: 0, p2: 0 },
   shopSlot: "p1",
   menuIndex: 0,
@@ -1652,6 +2159,7 @@ const game = {
   // Esc while sailing: the game pauses behind a "leave this voyage?" popup.
   tugOffer: null, // null, or { kind: "pull" | "change", slot, choice: 0 = yes, 1 = no }: a yes / no popup for a tug captain
   tugOfferPending: false, // look for a pull offer once play starts
+  galley: null, // the computer's galley while it tows a carrack: { boat, target, phase, path, home, inbound }
   midGameChange: null, // slot choosing another ship in the middle of a voyage
   exitConfirm: null, // null, or { choice: 0 = return to menu, 1 = keep sailing }
   premiumReturnTo: "menu"
@@ -1767,14 +2275,8 @@ function toggleNightMode() {
   setUiMessage(`Time of day: ${game.settings.nightMode ? "Night" : "Day"}`);
 }
 
-// The key names shown in the page's help text follow the key bindings.
-function updateKeyHelp() {
-  for (const el of document.querySelectorAll("[data-keyhelp]")) el.textContent = keyName(game.settings.keybinds[el.dataset.keyhelp]);
-}
-
 function saveSettings() {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(game.settings));
-  updateKeyHelp();
 }
 
 const KEY_SYMBOLS = { Comma: ",", Period: ".", Slash: "/", Semicolon: ";", Quote: "'", BracketLeft: "[", BracketRight: "]", Backslash: "\\", Minus: "-", Equal: "=", Backquote: "`", ShiftRight: "R-Shift", ShiftLeft: "L-Shift", ControlRight: "R-Ctrl", ControlLeft: "L-Ctrl" };
@@ -1801,7 +2303,13 @@ function getProfile(slot) {
 }
 
 function getShipDefinition(id) {
+  if (id === ORDER_GALLEY.id) return ORDER_GALLEY;
   return SHIP_CATALOG.find((ship) => ship.id === id) || SHIP_CATALOG[0];
+}
+
+// 2-player with player 1 in the carrack: player 2 rows the galley.
+function secondRowsGalley(firstShipId) {
+  return mode === "local" && getShipDefinition(firstShipId).category === "Carrack";
 }
 
 function isShipOwned(profile, shipDef) {
@@ -1867,8 +2375,9 @@ function confirmShipSelectionAndStart() {
     confirmShipChange();
     return;
   }
-  const p2Next = mode === "local" && game.shipSelectSlot === "p1";
-  const slots = mode === "local" && !p2Next ? ["p1", "p2"] : ["p1"];
+  const galley = secondRowsGalley(game.shipSelections.p1); // no ship to pick for player 2
+  const p2Next = mode === "local" && game.shipSelectSlot === "p1" && !galley;
+  const slots = mode === "local" && !p2Next && !galley ? ["p1", "p2"] : ["p1"];
   for (const slot of slots) {
     const profile = getProfile(slot);
     const shipDef = getShipDefinition(game.shipSelections[slot]);
@@ -1881,6 +2390,10 @@ function confirmShipSelectionAndStart() {
       return;
     }
   }
+  // Every post must be filled before the ship leaves harbour.
+  for (const slot of slots) {
+    if (crewRequired(slot, game.shipSelections[slot])) return;
+  }
   if (p2Next) {
     game.shipSelectSlot = "p2";
     return;
@@ -1891,6 +2404,73 @@ function confirmShipSelectionAndStart() {
   }
   saveProfiles();
   resetGame();
+}
+
+// The screens that have the harbour behind them: the main menu and what opens
+// from it (not the ship choice in the middle of a voyage).
+const HARBOUR_SCREENS = ["menu", "voyage", "missions", "settings", "leaderboard", "shipSelect", "premium", "crew"];
+
+function inHarbour() {
+  return HARBOUR_SCREENS.includes(gameState) && !game.midGameChange;
+}
+
+// Clears the finished voyage away, so the harbour is calm and empty.
+function leaveRound() {
+  game.mission = null;
+  game.missionState = null;
+  game.player1 = game.player2 = game.ai = null;
+  game.galley = null;
+  hazards.length = 0;
+  dynamicDangers.length = 0;
+  game.pirateRaiders = [];
+  game.seaCreatures = [];
+  game.underwaterEnemies = [];
+  game.missiles = [];
+  game.volcanoRocks = [];
+  game.lavaPools = [];
+  game.iceSheets = [];
+  game.jetBursts = [];
+  game.jetTracers = [];
+  game.floatingScores = [];
+  game.cannonCinematic = null;
+  fogBanks = [];
+  waterSpout.state = "dormant";
+  resetTempest();
+  resetTsunami();
+  resetWhirlpool();
+  game.wind = { x: 14, y: -8 }; // a light breeze for the flags
+  resetSea();
+  stopLookout();
+}
+
+// Each frame: on the harbour screens, player 1's last used ship lies moored at
+// Harbour A. (It is kept while in the dockyard, which has its own scene.)
+function updateHarbourScene() {
+  if (!inHarbour()) {
+    if (gameState !== "shop") game.harbourShip = null;
+    return;
+  }
+  if (game.player1) leaveRound();
+  const shipDef = getShipDefinition(usableShipId("p1"));
+  game.polar = shipDef.category === "Icebreaker"; // snow on the harbour
+  if (game.harbourShip && game.harbourShip.shipId === shipDef.id) return;
+  const ship = newShip("cruise", HarbourA.x, HarbourA.y, 0);
+  applyShipDefinition(ship, shipDef);
+  ship.anchored = true;
+  mooredAtBerth(ship, HarbourA, 0);
+  game.harbourShip = ship;
+}
+
+// The Hospitaller carrack takes both harbours back to the 16th century.
+function oldEra() {
+  const ships = game.harbourShip ? [game.harbourShip] : humanShips();
+  return ships.some((s) => s.category === "Carrack");
+}
+
+// The 3D harbours are changing age behind their "please wait" screen
+// (render3d.js sets view3d.eraChange): the game holds still meanwhile.
+function eraLoading() {
+  return view3d.active && !!view3d.eraChange && gameState !== "shop";
 }
 
 function humanShips() {
@@ -1945,31 +2525,30 @@ function registerUiRect(x, y, w, h, onClick) {
   game.uiRects.push({ x, y, w, h, onClick });
 }
 
+// On touch screens a tap just beside a button counts too: the nearest one
+// within TOUCH_SLACK.
+const TOUCH_SLACK = 14;
 function hitUiRect(x, y) {
+  let near = null;
+  let nearest = TOUCH_UI ? TOUCH_SLACK : 0;
   for (let i = game.uiRects.length - 1; i >= 0; i -= 1) {
     const rect = game.uiRects[i];
-    if (x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) {
-      return rect;
+    const gap = Math.hypot(Math.max(rect.x - x, 0, x - rect.x - rect.w), Math.max(rect.y - y, 0, y - rect.y - rect.h));
+    if (gap === 0) return rect;
+    if (gap < nearest) {
+      near = rect;
+      nearest = gap;
     }
   }
-  return null;
+  return near;
 }
 
-// Browsers only allow sound after the player has clicked or pressed a key on
-// the page (an installed app may play straight away). Starting it earlier
-// makes the browser log "The AudioContext was not allowed to start".
-function audioAllowed() {
-  if (IS_ANDROID_APP) return true; // the app lets sound play without a tap (MainActivity)
-  if (navigator.getAutoplayPolicy) return navigator.getAutoplayPolicy("audiocontext") === "allowed";
-  if (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) return true;
-  if (navigator.userActivation) return navigator.userActivation.hasBeenActive;
-  return true;
-}
-
-// Creates the sound system on first use, once sound is allowed (see
-// audioAllowed); every later call wakes it up again if it was suspended.
+// Creates the sound system on first use; every later call wakes it up again if
+// it was suspended. It is first called as the game launches, so the intro is
+// heard at once wherever sound may play without a click (the Android app, an
+// installed app, a site allowed to play sound). Elsewhere the browser holds it
+// suspended until the first click or key press.
 function ensureAudio() {
-  if (!game.audioContext && !audioAllowed()) return false;
   if (!game.audioContext) {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx) return false;
@@ -1978,7 +2557,7 @@ function ensureAudio() {
     // The intro starts the moment sound is allowed.
     game.audioContext.addEventListener("statechange", playIntro);
   }
-  if (game.audioContext.state === "suspended" && audioAllowed()) {
+  if (game.audioContext.state === "suspended") {
     game.audioContext.resume().catch(() => {});
   }
   game.audioEnabled = true;
@@ -2085,6 +2664,7 @@ const lookoutCalls = new Set(); // spoken or waiting to be spoken
 // being spoken finishes its sentence, but nothing new starts. A call still
 // waiting in the queue is dropped as it comes up; the danger markers go.
 function stopLookout() {
+  crewFlush(); // the crew's experience is saved whenever play stops
   for (const line of lookoutCalls) line.dropped = true;
   game.targetAlerts = [];
 }
@@ -2095,37 +2675,57 @@ function duckForVoice(on) {
   sfx.out.gain.setTargetAtTime(level, game.audioContext.currentTime, on ? 0.08 : 0.4);
 }
 
+function voiceOn() {
+  return !!window.speechSynthesis && soundLevel().volume > 0;
+}
+
+// Speaks a call from the lookout or the crew, unless there is no voice or one
+// call is already waiting (calls stay current that way).
+function speakCall(text) {
+  if (!voiceOn() || window.speechSynthesis.pending) return;
+  const line = new SpeechSynthesisUtterance(text);
+  // Speech can't go above full volume, so it gets full volume from Medium
+  // up, and the game's own sounds dip while the voice speaks.
+  line.volume = Math.min(1, soundLevel().volume * 1.5);
+  line.rate = 1.1;
+  lookoutCalls.add(line);
+  line.onstart = () => {
+    // A call dropped while it waited: the one before it has ended, so
+    // cancelling now silences only this one.
+    if (line.dropped) window.speechSynthesis.cancel();
+    else duckForVoice(true);
+  };
+  line.onend = line.onerror = () => {
+    lookoutCalls.delete(line);
+    duckForVoice(false);
+  };
+  window.speechSynthesis.speak(line);
+}
+
 function updateLookout() {
-  if (!window.speechSynthesis || soundLevel().volume <= 0) return;
+  const voice = voiceOn();
   const ships = humanShips().filter((s) => !s.capsized);
   for (const ship of ships) {
+    // A signed-on lookout also reports on screen, so works with sound off.
+    const crewed = !!crewOn(ship, "lookout");
+    if (!voice && !crewed) continue;
+    const range = crewLookoutRange(ship);
     if (!ship.dangersCalled) ship.dangersCalled = new Set();
     for (const d of nearbyDangers(ship)) {
-      if (d.gap > LOOKOUT_RANGE * 1.3) ship.dangersCalled.delete(d.obj);
-      if (d.gap > LOOKOUT_RANGE || ship.dangersCalled.has(d.obj)) continue;
+      if (d.gap > range * 1.3) ship.dangersCalled.delete(d.obj);
+      if (d.gap > range || ship.dangersCalled.has(d.obj)) continue;
       // Keep at most one call waiting, so warnings stay current.
-      if (window.speechSynthesis.pending) return;
+      if (voice && window.speechSynthesis.pending) break;
       ship.dangersCalled.add(d.obj);
       const who = ships.length > 1 ? `Captain ${ship.playerName || ""}` : "Captain";
-      const line = new SpeechSynthesisUtterance(`${who}, ${d.name} ${directionFrom(ship, d.x, d.y)}!`);
-      // Speech can't go above full volume, so it gets full volume from Medium
-      // up, and the game's own sounds dip while the lookout speaks.
-      line.volume = Math.min(1, soundLevel().volume * 1.5);
-      line.rate = 1.1;
-      lookoutCalls.add(line);
-      line.onstart = () => {
-        // A call dropped while it waited: the one before it has ended, so
-        // cancelling now silences only this one.
-        if (line.dropped) window.speechSynthesis.cancel();
-        else duckForVoice(true);
-      };
-      line.onend = line.onerror = () => {
-        lookoutCalls.delete(line);
-        duckForVoice(false);
-      };
+      const call = crewed ? crewLookoutText(ship, d) : `${d.name} ${directionFrom(ship, d.x, d.y)}!`;
+      if (crewed) {
+        crewCard(ship, "lookout", call);
+        crewGain(ship, "lookout", 8);
+      }
       playAlertTone(980, 0.14, 0.04, "square");
       window.setTimeout(() => playAlertTone(980, 0.14, 0.04, "square"), 180);
-      window.speechSynthesis.speak(line);
+      speakCall(`${who}, ${call}`);
     }
     // A danger that is gone (sunk, despawned, dormant) can be called again later.
     const present = new Set(nearbyDangers(ship).map((d) => d.obj));
@@ -2396,7 +2996,8 @@ function attemptRepairForSlot(slot) {
   const plan = ship.repairPlan;
   const baseCost = plan.minCost + Math.floor(Math.random() * (plan.maxCost - plan.minCost + 1));
   const complexitySpike = Math.random() < 0.2 ? Math.ceil(baseCost * 0.5) : 0;
-  const attemptCost = baseCost + complexitySpike;
+  const engineer = crewSkill(ship, "engineer");
+  const attemptCost = Math.max(1, Math.round((baseCost + complexitySpike) * (1 - 0.3 * engineer)));
   if (profile.points < attemptCost) {
     setUiMessage(`${profile.name} needs ${attemptCost} points for repair effort`);
     return;
@@ -2404,8 +3005,9 @@ function attemptRepairForSlot(slot) {
 
   profile.points -= attemptCost;
   saveProfiles();
+  crewGain(ship, "engineer", 10);
 
-  let effort = plan.minEffort + Math.random() * (plan.maxEffort - plan.minEffort);
+  let effort = (plan.minEffort + Math.random() * (plan.maxEffort - plan.minEffort)) * (1 + 0.5 * engineer);
   let complication = "";
   if (Math.random() < 0.16) {
     effort *= 0.45;
@@ -2420,8 +3022,9 @@ function attemptRepairForSlot(slot) {
     return;
   }
 
-  const success = Math.random() < plan.successChance;
+  const success = Math.random() < plan.successChance + 0.15 * engineer;
   if (success) {
+    crewGain(ship, "engineer", 25);
     let healed = Math.round(plan.minHeal + Math.random() * (plan.maxHeal - plan.minHeal));
     healed = Math.min(healed, damage, reserveLeft);
     ship.hp = Math.min(ship.maxHull, ship.hp + healed);
@@ -2508,13 +3111,15 @@ function findSafeAISpawnPoint(fallback) {
 function resetGame() {
   game.profiles = loadProfiles();
 
-  game.level = 1;
-  game.levelTransition = null;
-  buildHazardsForLevel(getLevelConfig(game.level));
+  game.mission = missionById(game.voyage);
+  game.crossings = 0;
+  game.arrival = null;
+  buildHazards();
 
   game.player1 = newShip("cruise", HarbourA.x, HarbourA.y, -0.8);
   game.player2 = mode === "local" ? newShip("playerTwo", HarbourA.x, HarbourA.y, -0.8) : null;
-  game.ai = mode === "single" ? newShip("pirate", HarbourA.x + 480, HarbourA.y - 140, -0.6) : null;
+  // A mission's pirates all come as raiders, out of its own waters.
+  game.ai = mode === "single" && !game.mission ? newShip("pirate", HarbourA.x + 480, HarbourA.y - 140, -0.6) : null;
   if (game.ai) {
     const safeSpawn = findSafeAISpawnPoint({ x: game.ai.x, y: game.ai.y });
     game.ai.x = safeSpawn.x;
@@ -2523,7 +3128,8 @@ function resetGame() {
 
   applyShipDefinition(game.player1, getShipDefinition(usableShipId("p1")));
   if (game.player2) {
-    applyShipDefinition(game.player2, getShipDefinition(usableShipId("p2")));
+    const own = usableShipId("p1");
+    applyShipDefinition(game.player2, secondRowsGalley(own) ? ORDER_GALLEY : getShipDefinition(usableShipId("p2")));
   }
 
   applyGadgets(game.player1, getProfile("p1"), "p1");
@@ -2534,7 +3140,7 @@ function resetGame() {
   initRepairState(game.player1);
   initRepairState(game.player2);
 
-  // Each level starts with the ships at anchor, lines fast, along the quays.
+  // Each voyage starts with the ships at anchor, lines fast, along the quays.
   game.player1.anchored = true;
   mooredAtBerth(game.player1, HarbourA, 0);
   if (game.player2) {
@@ -2555,19 +3161,19 @@ function resetGame() {
 
   resetAiDirector(9);
 
-  const levelConfig = getLevelConfig(game.level);
+  const threats = voyageThreats();
 
   game.pirateRaiders = [];
   game.seaCreatures = [];
   game.underwaterEnemies = [];
   game.missiles = [];
-  game.nextRaiderSpawnAt = randomInterval(levelConfig.raiderInterval);
-  game.nextCreatureSpawnAt = randomInterval(levelConfig.creatureInterval);
-  game.nextUnderwaterSpawnAt = randomInterval(levelConfig.underwaterInterval);
+  game.nextRaiderSpawnAt = randomInterval(threats.raiderInterval);
+  game.nextCreatureSpawnAt = randomInterval(threats.creatureInterval);
+  game.nextUnderwaterSpawnAt = randomInterval(threats.underwaterInterval);
   // The wind blows from a random quarter at a random strength for the whole
   // round (it only gusts and veers a little); see updateWind.
   game.windDir = Math.random() * Math.PI * 2;
-  game.windBase = WIND_BASE[0] + Math.random() * (WIND_BASE[1] - WIND_BASE[0]);
+  game.windBase = (WIND_BASE[0] + Math.random() * (WIND_BASE[1] - WIND_BASE[0])) * (game.mission ? game.mission.wind : 1);
   game.windLog = [];
   game.windLogAt = -9;
   game.windMax = 0;
@@ -2587,35 +3193,38 @@ function resetGame() {
   game.uiMessageTtl = 0;
 
   waterSpout.state = "dormant";
-  waterSpout.timer = randomInterval(levelConfig.spoutDormant);
+  waterSpout.timer = randomInterval(threats.spoutDormant);
   resetTempest();
   resetTsunami();
   resetWhirlpool();
 
   game.elapsed = 0;
+  startMissionState();
   game.tugOfferPending = true;
-  game.nextThreatAllowedAt = LEVEL_CALM_TIME;
+  game.galley = null;
+  game.nextThreatAllowedAt = OPENING_CALM_TIME;
   resultText = "";
   gameState = "playing";
 }
 
-// Rebuilds hazards/dynamicDangers from scratch to match a level config's
-// counts, placing each new obstacle clear of the harbours and everything
-// already placed. Used both for the initial layout and every level-up, so
-// each level has its own obstacle count/mix rather than a fixed layout.
+// Rebuilds hazards/dynamicDangers from scratch: Free Play places each new
+// obstacle clear of the harbours and everything already placed; a mission has
+// its own fixed obstacles and pack ice.
 // Open water kept between hazards (beyond their danger rings) so there is
 // always a clear channel to sail through.
 const HAZARD_CHANNEL = 170;
 
-function buildHazardsForLevel(config) {
+function buildHazards() {
+  const mission = game.mission;
+  const config = mission ? { islands: 0, icebergs: 0, volcanoes: 0, storms: mission.storms } : FREE_PLAY;
   hazards.length = 0;
   dynamicDangers.length = 0;
   game.volcanoRocks = [];
   game.lavaPools = [];
   const placed = [HarbourA, HarbourB];
-  game.polar = isPolarRun();
+  game.polar = mission ? !!mission.polar : isPolarRun();
   game.iceSheets = [];
-  if (game.polar) {
+  if (game.polar && !mission) {
     for (const h of [HarbourA, HarbourB]) {
       const c = harbourPoint(h, 250, 250);
       const sheet = makeIceSheet(c.x, c.y, 360, h);
@@ -2672,9 +3281,20 @@ function buildHazardsForLevel(config) {
     placed.push(hz);
   }
 
+  for (const fixed of mission ? mission.hazards : []) {
+    const hz = { ...fixed, danger: fixed.r + { volcano: 58, island: 20, iceberg: 32 }[fixed.kind] };
+    if (hz.kind === "iceberg") {
+      const dir = Math.random() * Math.PI * 2;
+      hz.vx = Math.cos(dir) * 12;
+      hz.vy = Math.sin(dir) * 12;
+    }
+    hazards.push(hz);
+  }
+  for (const [x, y, r] of (mission && mission.ice) || []) game.iceSheets.push(makeIceSheet(x, y, r));
+
   // Pack ice: about one sheet for every two icebergs, in open water (more,
   // and bigger, on a polar run).
-  const sheets = Math.ceil(config.icebergs / 2) + (game.polar ? 2 : 0);
+  const sheets = mission ? 0 : Math.ceil(config.icebergs / 2) + (game.polar ? 2 : 0);
   for (let i = 0; i < sheets; i += 1) {
     const r = (game.polar ? 180 : 150) + Math.random() * 90;
     const spot = randomSpot(r + HAZARD_CHANNEL);
@@ -2684,7 +3304,7 @@ function buildHazardsForLevel(config) {
   }
 
   // Storms wait off the map, upwind, and blow in one by one at a random time
-  // STORM_ARRIVAL into the level, so a level starts clear (no storm haze or
+  // STORM_ARRIVAL into the crossing, so it starts clear (no storm haze or
   // storm seas over the harbour) and each storm is seen coming.
   for (let i = 0; i < config.storms; i += 1) {
     const r = 58 + Math.random() * 30;
@@ -2706,7 +3326,7 @@ function buildHazardsForLevel(config) {
 }
 
 // Banks each human ship's in-progress score into their profile without
-// ending the round, so points earned before a level-up aren't lost or
+// ending the round, so points earned on one crossing aren't lost or
 // double-counted when the round eventually does end.
 function bankRunScore() {
   let changed = false;
@@ -2726,10 +3346,10 @@ function bankRunScore() {
   if (changed) saveProfiles();
 }
 
-// Sends a ship back to Harbour A for the new level. A capsized ship is
+// Sends a ship back to Harbour A for the next crossing. A capsized ship is
 // revived here too - otherwise its wreck would just sit frozen on screen
 // for the rest of the game instead of rejoining the next lap.
-function respawnShipForLevel(ship, x, y, heading) {
+function respawnShip(ship, x, y, heading) {
   if (!ship) return;
   ship.x = x;
   ship.y = y;
@@ -2743,63 +3363,67 @@ function respawnShipForLevel(ship, x, y, heading) {
   if (ship.isHuman) mooredAtBerth(ship, HarbourA, ship === game.player2 ? 1 : 0);
   else ship.ropes = 0;
   ship.castOff = false;
+  ship.leftA = false; // the carrack needs towing out again
   ship.nextDockAwardAt = 0;
   ship.tow = null;
-  ship.fire = null; // a fire from the last level is out
+  ship.fire = null; // a fire from the last crossing is out
   ship.jet = null; // the carrier's jet is back on deck
+  ship.course = null; // the navigator plots the new sea afresh
+  ship.track = null; // and a new track is started
   ship.kx = 0; // and no shove from a last bump or wave carries over
   ship.ky = 0;
 }
 
-// Reaching Harbour B doesn't end the game - it banks the score earned so
-// far, then reshuffles hazards/dangers and sends every surviving ship back
-// to Harbour A for a fresh lap with new obstacles and creature spawns.
-function startNextLevel() {
-  game.level = (game.level || 1) + 1;
+// Free Play: reaching Harbour B doesn't end the game - it banks the score
+// earned so far, then reshuffles hazards/dangers and sends every surviving
+// ship back to Harbour A for a fresh crossing.
+function startNextCrossing() {
+  game.crossings += 1;
   bankRunScore();
+  game.galley = null;
 
-  const levelConfig = getLevelConfig(game.level);
-  buildHazardsForLevel(levelConfig);
+  const threats = voyageThreats();
+  buildHazards();
 
   game.pirateRaiders = [];
   game.seaCreatures = [];
   game.underwaterEnemies = [];
   game.missiles = [];
-  game.nextRaiderSpawnAt = game.elapsed + randomInterval(levelConfig.raiderInterval);
-  game.nextCreatureSpawnAt = game.elapsed + randomInterval(levelConfig.creatureInterval);
-  game.nextUnderwaterSpawnAt = game.elapsed + randomInterval(levelConfig.underwaterInterval);
+  game.nextRaiderSpawnAt = game.elapsed + randomInterval(threats.raiderInterval);
+  game.nextCreatureSpawnAt = game.elapsed + randomInterval(threats.creatureInterval);
+  game.nextUnderwaterSpawnAt = game.elapsed + randomInterval(threats.underwaterInterval);
 
   waterSpout.state = "dormant";
-  waterSpout.timer = randomInterval(levelConfig.spoutDormant);
+  waterSpout.timer = randomInterval(threats.spoutDormant);
   resetTempest();
   resetTsunami();
-  // Everything starts afresh with the new level: whirlpool, fog and the sea.
+  // Everything starts afresh with the new crossing: whirlpool, fog and the sea.
   game.jetBursts = [];
   game.jetTracers = [];
   resetWhirlpool();
   startFogForRound();
   resetSea();
-  game.nextThreatAllowedAt = game.elapsed + LEVEL_CALM_TIME;
+  game.nextThreatAllowedAt = game.elapsed + OPENING_CALM_TIME;
 
   // A player whose ship sank stays out for the rest of the game: the other
   // carries on alone until they finish or sink too (that ends the game).
-  if (!game.player1.capsized) respawnShipForLevel(game.player1, HarbourA.x + 16, HarbourA.y + 15, -0.8);
-  if (game.player2 && !game.player2.capsized) respawnShipForLevel(game.player2, HarbourA.x - 16, HarbourA.y - 15, -0.8);
-  respawnShipForLevel(game.ai, HarbourA.x + 360, HarbourA.y - 100, -0.6);
+  if (!game.player1.capsized) respawnShip(game.player1, HarbourA.x + 16, HarbourA.y + 15, -0.8);
+  if (game.player2 && !game.player2.capsized) respawnShip(game.player2, HarbourA.x - 16, HarbourA.y - 15, -0.8);
+  respawnShip(game.ai, HarbourA.x + 360, HarbourA.y - 100, -0.6);
   if (game.ai && !game.ai.capsized) {
     const safeSpawn = findSafeAISpawnPoint({ x: game.ai.x, y: game.ai.y });
     game.ai.x = safeSpawn.x;
     game.ai.y = safeSpawn.y;
   }
-  // Fresh plan for the new level: the last level's ambush point (often right
+  // Fresh plan for the new crossing: the last one's ambush point (often right
   // by Harbour B, where the player just docked) must not carry over.
   resetAiDirector(game.elapsed + 4);
 
-  // Freeze play behind an animated "Level N" card until the player
+  // Freeze play behind an animated "Harbour reached" card until the player
   // acknowledges it - handleGameLogic no-ops outside "playing", so the
   // freshly-laid-out world just sits still until they press a key.
-  game.levelTransition = { level: game.level, elapsed: 0 };
-  gameState = "levelTransition";
+  game.arrival = { elapsed: 0 };
+  gameState = "arrival";
   stopLookout();
 }
 
@@ -2839,6 +3463,8 @@ const HELM = {
   Futuristic: { rudder: 0.15, lag: 0.18, wash: 0.3 }, // vectored thrust
   Hydrofoil: { rudder: 0.3, lag: 0.36, wash: 0.07 },
   Pirate: { rudder: 0.48, lag: 0.48, wash: 0.07 },
+  Carrack: { rudder: 0.55, lag: 0.68, wash: 0.25 }, // backed headsails help her round, even with no way on
+  Galley: { rudder: 0.3, lag: 0.4, wash: 0.6 }, // oars: turns almost on the spot
   Assault: { rudder: 0.42, lag: 0.54, wash: 0.06 },
   Cruise: { rudder: 0.6, lag: 0.78, wash: 0.08 }, // pod drives and bow thrusters
   Cargo: { rudder: 0.78, lag: 0.96, wash: 0.05 },
@@ -2846,14 +3472,15 @@ const HELM = {
   Tug: { rudder: 0.22, lag: 0.3, wash: 0.4 }, // azimuth thrusters: turns on the spot
   Icebreaker: { rudder: 0.6, lag: 0.8, wash: 0.06 },
   Tanker: { rudder: 0.9, lag: 1.25, wash: 0.04 },
-  GasTanker: { rudder: 0.85, lag: 1.2, wash: 0.04 }
+  GasTanker: { rudder: 0.85, lag: 1.2, wash: 0.04 },
+  WarTanker: { rudder: 0.82, lag: 1.15, wash: 0.05 }
 };
 // Large ships have a bow and a stern thruster, used in pairs so they never push
 // the ship from one end only: the steering keys turn the ship on the spot (bow
 // one way, stern the other), and Q / E (player 1) or [ / ] (player 2) slide it
 // bodily to port / starboard (both push the same way, the heading stays put).
 // Both fade out as speed builds.
-const THRUSTER_SHIPS = ["Cruise", "Cargo", "Carrier", "Tanker", "GasTanker", "Icebreaker", "Assault"];
+const THRUSTER_SHIPS = ["Cruise", "Cargo", "Carrier", "Tanker", "GasTanker", "WarTanker", "Icebreaker", "Assault"];
 const THRUSTER_KEYS = {
   get p1() { return [game.settings.keybinds.p1SlideLeft, game.settings.keybinds.p1SlideRight]; },
   get p2() { return [game.settings.keybinds.p2SlideLeft, game.settings.keybinds.p2SlideRight]; }
@@ -2877,11 +3504,12 @@ function helmOf(ship) {
 // the pirates' route planner, so their plans turn the way their ships do.
 function helmStep(h, ship, steer, throttle, speed, dt) {
   const helm = helmOf(ship);
-  h.rudder += clamp(steer - h.rudder, -dt / helm.rudder, dt / helm.rudder);
+  const quick = 1 - 0.3 * crewSkill(ship, "helm"); // a good helmsman answers sooner
+  h.rudder += clamp(steer - h.rudder, -dt / (helm.rudder * quick), dt / (helm.rudder * quick));
   const flow = speed < 0
     ? (speed / ship.maxSpeed) * ASTERN_STEERING
     : Math.max(speed / ship.maxSpeed, helm.wash * Math.max(0, throttle));
-  h.yaw += (h.rudder * ship.turnRate * flow - h.yaw) * (1 - Math.exp(-dt / helm.lag));
+  h.yaw += (h.rudder * ship.turnRate * flow - h.yaw) * (1 - Math.exp(-dt / (helm.lag * quick)));
   return h.yaw;
 }
 
@@ -2893,7 +3521,7 @@ function turnSpeedKeep(ship, yaw, dt) {
 // Berthed in a harbour a player's ship lies at anchor: the wind doesn't
 // drift it and the engine and rudder are idle. It anchors by itself when it
 // comes to rest (engine stopped) in a harbour's berthing area, and starts
-// each level at anchor. R (player 1) / Comma (player 2) weighs anchor to
+// each voyage at anchor. R (player 1) / Comma (player 2) weighs anchor to
 // sail, or drops it again while berthed.
 const ANCHOR_KEYS = { get p1() { return game.settings.keybinds.p1Anchor; }, get p2() { return game.settings.keybinds.p2Anchor; } };
 const ANCHOR_KEY_NAMES = { get p1() { return keyName(game.settings.keybinds.p1Anchor); }, get p2() { return keyName(game.settings.keybinds.p2Anchor); } };
@@ -2909,35 +3537,43 @@ function berthedHarbour(ship) {
 }
 
 // A ship at anchor lies alongside a quay: berth 0 along the first quay (the
-// one with the pumps), berth 1 along the second, bow to the sea. Moored, it
-// is held by four lines (bow, stern and two springs) to the quay bollards.
+// one with the pumps), berth 1 along the second. Moored, it
+// is held by five lines (long head line, bow, stern and two springs) to the quay bollards.
 // Weighing anchor casts the lines off one by one; when the last is clear the
 // captain is told the ship is ready to sail.
 const BERTH_CENTRE = 112; // along the quay
 const BERTH_GAP = 1.5; // fender gap between hull and quay face
 const WARP_SPEED = 28; // units/s the ship is eased into its berth
-const ROPES_MAKE_TIME = 4; // s to make all four lines fast
+const ROPES_MAKE_TIME = 4; // s to make all the lines fast
 const ROPES_CAST_TIME = 5; // s to cast them all off
-const MOORING_LINES = 4;
+const MOORING_LINES = 5;
 const READY_SIGNAL_TIME = 6; // s the "ready to sail" signal stays up
 
-// The captain must bring the ship to its berth (alongside the quay, bow to the sea, close to the
+// The captain must bring the ship to its berth (alongside the quay, bow either way, close to the
 // marked place) before the anchor can go down; the ship is then eased the last few units alongside.
-const BERTH_REACH = 45; // units from the berth's exact spot
+const BERTH_REACH = 45; // units out from the berth's exact spot, away from the quay
+const BERTH_HALF_LEN = 62; // along the quay: half the marked berth (BERTH_LEN in render3d.js)
 const BERTH_ANGLE = 0.7; // rad off the berth's heading
 
 function atBerth(ship) {
   const h = berthedHarbour(ship);
   if (!h) return false;
-  const pose = berthPose(h, pickBerth(h, ship), ship);
-  return dist(ship, pose) < BERTH_REACH && Math.abs(normalizeAngle(pose.angle - ship.angle)) < BERTH_ANGLE;
+  const slot = pickBerth(h, ship);
+  const pose = berthPose(h, slot, ship);
+  const alongX = slot === 1; // which map axis this berth's quay runs along
+  const along = Math.abs(alongX ? ship.x - pose.x : ship.y - pose.y);
+  const out = Math.abs(alongX ? ship.y - pose.y : ship.x - pose.x);
+  return along < BERTH_HALF_LEN && out < BERTH_REACH && Math.abs(normalizeAngle(pose.angle - ship.angle)) < BERTH_ANGLE;
 }
 
 function berthPose(h, slot, ship) {
   const lateral = 22 + bumpShape(ship).r + BERTH_GAP;
   const pt = slot === 0 ? harbourPoint(h, lateral, BERTH_CENTRE) : harbourPoint(h, BERTH_CENTRE, lateral);
   const dir = slot === 0 ? { x: 0, y: h.sb } : { x: h.sa, y: 0 };
-  return { x: pt.x, y: pt.y, angle: Math.atan2(dir.y, dir.x) };
+  const seaward = Math.atan2(dir.y, dir.x);
+  // The ship lies whichever way round it came in: it is never swung end for end.
+  const angle = Math.cos(ship.angle - seaward) < 0 ? normalizeAngle(seaward + Math.PI) : seaward;
+  return { x: pt.x, y: pt.y, angle };
 }
 
 // The berth a ship coming to rest takes: the nearer free one (tankers prefer
@@ -2951,8 +3587,9 @@ function pickBerth(h, ship) {
   return free.reduce((best, k) => (dist(ship, berthPose(h, k, ship)) < dist(ship, berthPose(h, best, ship)) ? k : best));
 }
 
-// Put a ship straight into its berth, at anchor with the lines fast (a new level).
+// Put a ship straight into its berth, at anchor with the lines fast, bow to the sea (a new crossing).
 function mooredAtBerth(ship, h, slot) {
+  ship.angle = slot === 0 ? Math.atan2(h.sb, 0) : Math.atan2(0, h.sa);
   const pose = berthPose(h, slot, ship);
   ship.x = pose.x;
   ship.y = pose.y;
@@ -2989,7 +3626,7 @@ function updateAnchor(ship) {
   }
   // Entering the destination's berth: tell the captain how to finish (the
   // banner from drawBerthPrompts stays up until they anchor).
-  if (berth === HarbourB && !ship.anchored && !ship.berthHinted) {
+  if (berth === HarbourB && !ship.anchored && !ship.berthHinted && ship.category !== "Carrack") {
     ship.berthHinted = true;
     setUiMessage(`${ship.playerName || "Ship"} reached Harbour B - bring the ship alongside the quay at its berth, then anchor`);
     playShipHorn();
@@ -3018,14 +3655,18 @@ function updateMooring(ship, dt) {
     }
   } else if (ship.anchored && ship.berth && ship.ropes < 1) {
     const before = ship.ropes;
-    ship.ropes = Math.min(1, ship.ropes + dt / ROPES_MAKE_TIME);
-    if (before < 1 && ship.ropes >= 1) setUiMessage(`${name} made fast alongside - lines secure`, ship.playerSlot);
+    ship.ropes = Math.min(1, ship.ropes + (dt / ROPES_MAKE_TIME) * (1 + crewSkill(ship, "bosun")));
+    if (before < 1 && ship.ropes >= 1) {
+      setUiMessage(`${name} made fast alongside - lines secure`, ship.playerSlot);
+      crewGain(ship, "bosun", 15);
+    }
   } else if (!ship.anchored && ship.ropes > 0) {
-    ship.ropes = Math.max(0, ship.ropes - dt / ROPES_CAST_TIME);
+    ship.ropes = Math.max(0, ship.ropes - (dt / ROPES_CAST_TIME) * (1 + crewSkill(ship, "bosun")));
     if (ship.ropes === 0) {
       ship.berth = null;
-      ship.readyAt = game.elapsed;
-      setUiMessage(`${name}: all lines clear - ready to sail!`, ship.playerSlot);
+      const towed = !!carrackPort(ship); // not ready to sail: she needs the galley (drawTowPrompts)
+      ship.readyAt = towed ? undefined : game.elapsed;
+      setUiMessage(towed ? `${name}: all lines clear - now the galley must tow her out` : `${name}: all lines clear - ready to sail!`, ship.playerSlot);
       playShipHorn();
     }
   }
@@ -3054,6 +3695,8 @@ function toggleAnchor(slot) {
 
 function applyMovement(ship, input, dt) {
   if (!ship || ship.capsized) return;
+  // what each side thruster is pushing: 1 full to starboard, -1 full to port
+  ship.thrusters = { bow: 0, stern: 0 };
 
   if (ship.anchored || ship.ropes > 0) {
     // Held by the anchor, or by the lines still being cast off: no drift,
@@ -3077,9 +3720,14 @@ function applyMovement(ship, input, dt) {
   }
 
   const throttleBase = input.forward ? 1 : input.backward ? -0.5 : 0;
-  const throttle = throttleBase * (input.throttleScale || 1);
+  let throttle = throttleBase * (input.throttleScale || 1);
   const steer = (input.left ? -1 : 0) + (input.right ? 1 : 0);
 
+  const inPort = !!carrackPort(ship); // only a tow moves a carrack in harbour waters
+  if (inPort) {
+    throttle = 0;
+    ship.speed *= keepPer60(0.95, dt);
+  }
   ship.throttle = throttle; // read by the engine sound
   if (!ship.helm) ship.helm = { rudder: 0, yaw: 0 };
   const yaw = helmStep(ship.helm, ship, steer, throttle, ship.speed, dt);
@@ -3090,12 +3738,21 @@ function applyMovement(ship, input, dt) {
     const slide = (input.thrust || 0) * THRUSTER_SWAY * k; // same-way pair: slides, no turn
     ship.x -= Math.sin(ship.angle) * slide;
     ship.y += Math.cos(ship.angle) * slide;
+    const power = 1 - Math.abs(ship.speed) / THRUSTER_MAX_SPEED;
+    ship.thrusters.bow = clamp((input.thrust || 0) + steer, -1, 1) * power;
+    ship.thrusters.stern = clamp((input.thrust || 0) - steer, -1, 1) * power;
   }
   ship.speed *= turnSpeedKeep(ship, yaw, dt);
-  ship.speed += throttle * ship.accel * dt;
+  const following = Math.max(0, Math.cos(ship.angle - Math.atan2(game.wind.y, game.wind.x))); // 1 = wind dead astern
+  const drive = 1 + 0.1 * crewSkill(ship, "engineer") + 0.1 * crewSkill(ship, "sails") * following;
+  // The carrack has no engine: what the sails make of the wind is all her drive.
+  const sails = ship.category === "Carrack" ? carrackWind(ship).power : 1;
+  ship.speed += throttle * sails * ship.accel * drive * dt;
   // Water drag; a foil-borne hydrofoil skims above most of it.
   ship.speed *= keepPer60(0.986 + 0.007 * (ship.foilLift || 0), dt);
   ship.speed = clamp(ship.speed, -ship.maxSpeed * 0.35, ship.maxSpeed);
+  // Rowing with a great ship on the rope is slow work.
+  if (ship.category === "Galley" && ship.tow) ship.speed = Math.min(ship.speed, GALLEY_TOWING_SPEED);
   updateShipIce(ship, dt);
 
   ship.x += Math.cos(ship.angle) * ship.speed * dt;
@@ -3106,7 +3763,8 @@ function applyMovement(ship, input, dt) {
 
   // Wind applies to all ships as continuous drift (less when foil-borne).
   const inBasin = !!berthedHarbour(ship);
-  const drift = (1 - ship.windResistance) * (1 - 0.4 * (ship.foilLift || 0)) * (inBasin ? HARBOUR_WIND_SHELTER : 1);
+  const handled = (1 - 0.25 * crewSkill(ship, "helm")) * (1 - 0.5 * crewSkill(ship, "sails"));
+  const drift = inPort ? 0 : (1 - ship.windResistance) * (1 - 0.4 * (ship.foilLift || 0)) * (inBasin ? HARBOUR_WIND_SHELTER : 1) * handled;
   ship.x += game.wind.x * drift * dt;
   ship.y += game.wind.y * drift * dt;
   if (inBasin) applyHarbourSwell(ship, dt);
@@ -3152,7 +3810,7 @@ function tankerHeat(ship) {
   const now = game.elapsed;
   ship.hitHeat = Math.max(0, (ship.hitHeat || 0) - (now - (ship.hitHeatAt || now)) * TANKER_HEAT_FADE) + 1;
   ship.hitHeatAt = now;
-  return ship.hitHeat >= TANKER_FIRING_HITS;
+  return ship.hitHeat >= TANKER_FIRING_HITS + Math.round(2 * crewSkill(ship, "pump"));
 }
 
 function damageShip(ship, amount, reason, hardCapsize = false, exact = false) {
@@ -3160,6 +3818,7 @@ function damageShip(ship, amount, reason, hardCapsize = false, exact = false) {
   if (safeInHarbour(ship) && MAN_MADE_DAMAGE.test(reason)) return;
   let effectiveAmount = hardCapsize || exact ? amount : amount * (1 - ship.damageReduction);
   if (exact && TANKERS[ship.category]) effectiveAmount *= TANKER_SHARE_DAMAGE;
+  if (TANKER_WEAPON_HIT.test(reason)) effectiveAmount *= 1 - 0.25 * crewSkill(ship, "pump");
   ship.hp -= effectiveAmount;
   ship.hitFlash = 0.2;
   const tanker = !!TANKERS[ship.category];
@@ -3173,11 +3832,11 @@ function damageShip(ship, amount, reason, hardCapsize = false, exact = false) {
   if (broken) {
     ship.hp = 0;
     ship.capsized = true;
+    ship.sankAt = game.elapsed;
     ship.speed = 0;
     if (!tanker) ship.fire = null; // a breached tanker keeps burning as it goes down
     if (ship.isHuman && mode === "local") {
       ship.outAt = game.elapsed;
-      ship.outLevel = game.level || 1;
       setUiMessage(`${playerLabel(ship)} is out of the game`);
     }
     // The pirate's broadside has its own cinematic boom.
@@ -3196,14 +3855,14 @@ function attack(attacker, target, dt = 0) {
   if (attacker.reload > 0) return;
   if (attacker.deterredUntil > game.elapsed) return; // driven off by an acoustic deterrent
 
-  const range =(attacker.aiControlled ? 84 : 90) + (attacker.attackRangeBonus || 0);
+  const range = (attacker.aiControlled ? 84 : 90) + (attacker.attackRangeBonus || 0) + crewGunRange(attacker);
   const d = dist(attacker, target);
   const desired = Math.atan2(target.y - attacker.y, target.x - attacker.x);
   const facingError = Math.abs(normalizeAngle(desired - attacker.angle));
   // The pirate gets a wider firing arc than the player's guns: it has to
   // steer around the target and the player's bow is hard to keep bearing on.
   const arc = attacker.aiControlled ? 0.7 : 0.42;
-  const hasFiringSolution = d <= range && facingError < arc;
+  const hasFiringSolution = d <= range && gunsBear(attacker, facingError, arc);
 
   if (!hasFiringSolution) {
     // A pirate that briefly loses its aim (a swell, a course correction)
@@ -3248,11 +3907,22 @@ function attack(attacker, target, dt = 0) {
     playCannonShot(attacker.x, attacker.y);
     launchShots(attacker, target, "ball");
   }
+  attacker.reload *= 1 - 0.25 * crewSkill(attacker, "gunner");
+  crewGain(attacker, "gunner", 6);
+}
+
+// The wartime tanker's deck guns (world units from midships, bow and stern):
+// she can fire ahead or astern, from whichever gun faces the target.
+const DECK_GUNS = { bow: 28, stern: -29 };
+
+// Whether a target `off` radians from the bow is inside the ship's firing arc.
+function gunsBear(ship, off, arc) {
+  return off < arc || (ship.category === "WarTanker" && Math.PI - off < arc);
 }
 
 // Each class of ship defends itself with its own weapon. Civilian ships
 // (cruise, cargo, catamaran, hydrofoil) carry fire-fighting water cannons,
-// warships carry machine guns, the sailing boat keeps a classic cannon and
+// warships carry machine guns, the sailing boat and the carrack fire cannon and
 // the Futuristic Nova fires a laser. A bought Sonic Weapon replaces any of them.
 const WEAPON_BY_CATEGORY = {
   Cruise: "waterCannon",
@@ -3266,7 +3936,10 @@ const WEAPON_BY_CATEGORY = {
   Assault: "machineGun",
   Carrier: "machineGun",
   Futuristic: "laser",
-  Sailing: "cannon"
+  Sailing: "cannon",
+  WarTanker: "cannon", // the bow and stern deck guns
+  Carrack: "cannon",
+  Galley: "cannon" // the bow guns
 };
 const WEAPON_NAMES = { sonic: "SONIC", laser: "LASER", machineGun: "MG", waterCannon: "WATER", cannon: "CANNON" };
 
@@ -3285,10 +3958,15 @@ const SHOT_GAP = { ball: 0, water: 0.05, bullet: 0.07 };
 const SHOT_COLOR = { ball: "#2a2522", water: "#d9f3ff", bullet: "#ffd36b" };
 
 function launchShots(attacker, target, kind) {
+  let along = 0; // how far fore or aft of midships the round leaves from
+  if (attacker.category === "WarTanker") {
+    const ahead = (target.x - attacker.x) * Math.cos(attacker.angle) + (target.y - attacker.y) * Math.sin(attacker.angle) >= 0;
+    along = ahead ? DECK_GUNS.bow : DECK_GUNS.stern;
+  }
   for (let r = 0; r < SHOT_ROUNDS[kind]; r += 1) {
     game.missiles.push({
-      x: attacker.x,
-      y: attacker.y,
+      x: attacker.x + Math.cos(attacker.angle) * along,
+      y: attacker.y + Math.sin(attacker.angle) * along,
       vx: Math.cos(attacker.angle),
       vy: Math.sin(attacker.angle),
       target,
@@ -3348,16 +4026,19 @@ function resolveCannonHit(attacker, target, share = 1, kind = "ball") {
 
   if (target.isHuman !== undefined || target.aiControlled) {
     const wasAlive = !target.capsized;
-    if (share >= 1) sinkingHit(target, `hit by ${kind}`);
+    if (target.flagship) damageShip(target, (target.maxHull * share) / FLAGSHIP_HITS, `hit by ${kind}`, false, true);
+    else if (share >= 1) sinkingHit(target, `hit by ${kind}`);
     else damageShip(target, target.maxHull * share, `hit by ${kind}`, false, true);
     if (wasAlive && target.capsized && attackerScores) {
       awardScore(attacker, ENEMY_DESTROYED_SCORE, "enemy destroyed");
+      if (game.pirateRaiders.includes(target)) missionPirateSunk();
     }
   } else if (target.kind === "uboat" || target.kind === "submarine") {
     const wasAlive = target.hp > 0;
     target.hp -= 100 * share;
     if (wasAlive && target.hp <= 0 && attackerScores) {
       awardScore(attacker, ENEMY_DESTROYED_SCORE, "enemy destroyed");
+      missionSubSunk();
     }
   } else {
     // Sea creatures have no hull: they give up once a full kill's worth has landed.
@@ -3389,6 +4070,17 @@ function pickAttackTarget(ship, fallbackOpponent) {
     if (d < bestDist) {
       best = raider;
       bestDist = d;
+    }
+  }
+
+  // Guns bear on a submarine when a mission sends you after it.
+  if (game.missionState && missionStage().subs) {
+    for (const sub of game.underwaterEnemies) {
+      const d = dist(ship, sub);
+      if (sub.hp > 0 && d < bestDist) {
+        best = sub;
+        bestDist = d;
+      }
     }
   }
 
@@ -3458,7 +4150,7 @@ function processHazards(ship, dt) {
 // spells.
 const STORM_PACE = [40, 90]; // units/s
 const STORM_RAIN_SPELL = [5, 16]; // seconds before the rain turns heavier or lighter
-const STORM_ARRIVAL = [20, 90]; // seconds into a level before each storm blows in
+const STORM_ARRIVAL = [20, 90]; // seconds into a crossing before each storm blows in
 const STORM_RETURN = [25, 100]; // s of fair weather after a storm has gone before the next blows in
 const STORM_PARKED = -100000; // where a storm waits before it blows in (far off the map)
 
@@ -3537,7 +4229,8 @@ function windSwell() {
 function updateSeaState(dt) {
   let near = 0;
   for (const ship of humanShips()) near = Math.max(near, stormNearness(ship.x, ship.y));
-  const target = clamp(Math.max(windSea(), STORM_SEA * near), 0, 1);
+  const shelter = game.mission ? game.mission.calm : 1; // rivers and fjords stay calmer
+  const target = clamp(Math.max(windSea(), STORM_SEA * near), 0, 1) * shelter;
   // The sea builds quickly with the wind and dies down slowly after it.
   const rate = (goal, now) => Math.min(1, dt / (goal > now ? SEA_BUILD_TIME : SEA_CALM_TIME));
   sea.roughness += (target - sea.roughness) * rate(target, sea.roughness);
@@ -3550,7 +4243,7 @@ function updateSeaState(dt) {
     sea.setTimer = randomInterval(SEA_SET_TIME);
   }
   sea.sets += (sea.setsTarget - sea.sets) * Math.min(1, dt / 5);
-  const swellTarget = sea.sets * (1 + STORM_SWELL_BOOST * near) * windSwell();
+  const swellTarget = sea.sets * (1 + STORM_SWELL_BOOST * near) * windSwell() * shelter;
   sea.swell += (swellTarget - sea.swell) * rate(swellTarget, sea.swell);
 }
 
@@ -3579,6 +4272,7 @@ function applySeaPush(ship, dt) {
   const swell = sea.swell;
   let force = clamp((rough - 0.3) / 0.7, 0, 1) * swell * (1 - ship.windResistance);
   if (ship.owned && ship.owned.tempestScrambler) force *= 0.5;
+  force *= 1 - 0.4 * crewSkill(ship, "helm");
   if (force <= 0) return;
 
   const dirX = Math.cos(SEA_WAVE_DIR);
@@ -3703,12 +4397,15 @@ const QUAY_GENTLE = 22; // a touch slower than this is a soft contact (units/s)
 const QUAY_MIN_PUSH = 18; // even a touch eases the hull off the quay (units/s)
 
 function updateLandCollisions() {
+  // The computer's galley keeps her own course, so to others she is as solid as a quay.
+  const pieces = game.galley ? [...HARBOUR_LAND, hullSegment(game.galley.boat)] : HARBOUR_LAND;
   for (const ship of allCombatShips()) {
     if (ship.warping) continue; // being eased alongside its berth
-    for (const piece of HARBOUR_LAND) {
+    for (const piece of pieces) {
       const hit = bounceOffLand(ship, piece);
       if (hit >= 0) bumpSound(ship, ship, hit);
     }
+    if (game.mission) bounceOffBank(ship);
   }
 }
 
@@ -3735,7 +4432,12 @@ function bounceOffLand(ship, piece) {
   const ny = dy / len;
   ship.x += nx * (minDist - d);
   ship.y += ny * (minDist - d);
+  return reboundOff(ship, nx, ny);
+}
 
+// A hull pushed off land along (nx, ny): stops its way into it and bounces it.
+// Returns how hard it hit (0..1).
+function reboundOff(ship, nx, ny) {
   const v = bodyVelocity(ship);
   const closing = Math.max(0, -(v.x * nx + v.y * ny)); // speed into the land
   // Own way into the land stops; the part along the quay is kept.
@@ -3782,6 +4484,8 @@ function updateShipCollisions(dt) {
 // "knockback" velocity (kx, ky) that fades over about a second.
 const BUMP_BODY = {
   Sailing: { mass: 0.8, spring: 0.5 },
+  Carrack: { mass: 2, spring: 0.35 },
+  Galley: { mass: 1.4, spring: 0.45 },
   Catamaran: { mass: 1, spring: 0.5 },
   Futuristic: { mass: 1.2, spring: 0.5 },
   Hydrofoil: { mass: 0.9, spring: 0.5 },
@@ -3793,8 +4497,10 @@ const BUMP_BODY = {
   Icebreaker: { mass: 2.4, spring: 0.35 },
   Tanker: { mass: 3, spring: 0.3 },
   GasTanker: { mass: 2.9, spring: 0.3 },
+  WarTanker: { mass: 2.7, spring: 0.32 },
   ship: { mass: 1.6, spring: 0.45 }, // pirates and anything else
   creature: { mass: 3.5, spring: 0.95 },
+  croc: { mass: 0.4, spring: 0.1 },
   submarine: { mass: 2.4, spring: 0.6 },
   uboat: { mass: 2.8, spring: 0.6 }
 };
@@ -3809,6 +4515,8 @@ const BUMP_SHAPE = {
   Cruise: { h: 42.75, r: 6.25, off: 0 }, // 98 x 12.5 (300 m liner)
   Cargo: { h: 28, r: 10, off: 0 },
   Sailing: { h: 8.5, r: 4.5, off: 0 },
+  Carrack: { h: 15, r: 7, off: 0 },
+  Galley: { h: 21, r: 5, off: 0 },
   Catamaran: { h: 7, r: 8, off: 0 },
   Assault: { h: 23, r: 11, off: 0 },
   Carrier: { h: 47.4, r: 7.1, off: 0 }, // 109 long, hull 14 wide (333 m supercarrier)
@@ -3818,7 +4526,8 @@ const BUMP_SHAPE = {
   Icebreaker: { h: 20.5, r: 10.5, off: 0 },
   Tanker: { h: 29.9, r: 12.1, off: 0 },
   GasTanker: { h: 30.6, r: 12.4, off: 0 },
-  ship: { h: 5.2, r: 2.3, off: 0 }, // pirate galleons (real size, ~45 m)
+  WarTanker: { h: 26.5, r: 5.5, off: 0 }, // 64 x 11 (135 m wartime tanker)
+  ship: { h: 17, r: 8, off: 0 }, // 50 x 16 pirate galleons
   creature: { h: 23, r: 9.5, off: -5 },
   submarine: { h: 13, r: 5.5, off: 0 },
   uboat: { h: 13, r: 5.5, off: 0 }
@@ -3863,6 +4572,7 @@ function closestOnSegments(p, q) {
 }
 
 function bumpBody(e) {
+  if (e.variant === "croc") return BUMP_BODY.croc; // far lighter than a sea monster
   if (e.kind === "uboat" || e.kind === "submarine") return BUMP_BODY[e.kind];
   if (e.maxHull === undefined) return BUMP_BODY.creature;
   return BUMP_BODY[e.category] || BUMP_BODY.ship;
@@ -4008,6 +4718,13 @@ function updateIcebergs(dt) {
     hz.y = clamp(hz.y, 70, WORLD_H - 70);
 
     stickIcebergToVolcano(hz);
+    // Off a mission's banks.
+    const out = game.mission && keepAfloat(hz, hz.r + 6);
+    if (out && hz.vx * out.x + hz.vy * out.y < 0) {
+      const into = hz.vx * out.x + hz.vy * out.y;
+      hz.vx -= 2 * into * out.x;
+      hz.vy -= 2 * into * out.y;
+    }
   }
 }
 
@@ -4019,6 +4736,7 @@ const ENTRY_OUTSIDE = 90; // how far beyond the edge they appear
 const ENTRY_CLEAR = 160; // the water this far around the entry must be clear of land
 
 function randomEdgeSpawn() {
+  if (game.mission) return missionWaterSpawn();
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const edge = Math.floor(Math.random() * 4);
     const along = Math.random();
@@ -4067,7 +4785,7 @@ function spawnPirateRaider() {
     maxSpeed: 210,
     turnRate: 1.46,
     lifetime: 0,
-    despawnAt: 17 + Math.random() * 8,
+    despawnAt: (game.mission?.raiderLife || 17) + Math.random() * 8,
     motionSeed: Math.random() * Math.PI * 2
   });
 }
@@ -4115,11 +4833,11 @@ function chooseNearestShip(source) {
 function updateUnderwaterEnemies(dt) {
   if (gameState !== "playing") return;
 
-  const levelConfig = getLevelConfig(game.level);
-  if (game.elapsed >= game.nextUnderwaterSpawnAt && game.underwaterEnemies.length < levelConfig.underwaterCap && threatSlotOpen()) {
+  const threats = voyageThreats();
+  if (game.elapsed >= game.nextUnderwaterSpawnAt && game.underwaterEnemies.length < threats.underwaterCap && threatSlotOpen()) {
     claimThreatSlot();
     spawnUnderwaterEnemy();
-    game.nextUnderwaterSpawnAt = game.elapsed + randomInterval(levelConfig.underwaterInterval);
+    game.nextUnderwaterSpawnAt = game.elapsed + randomInterval(threats.underwaterInterval);
   }
 
   for (let i = game.underwaterEnemies.length - 1; i >= 0; i -= 1) {
@@ -4187,17 +4905,22 @@ function updateUnderwaterEnemies(dt) {
   }
 }
 
-function updatePirateRaiders(dt) {
-  if (mode !== "single" || gameState !== "playing") return;
+// Pirates sail against a lone captain in Free Play, and in any mission.
+function piratesAbout() {
+  return mode === "single" || !!game.mission;
+}
 
-  const levelConfig = getLevelConfig(game.level);
+function updatePirateRaiders(dt) {
+  if (!piratesAbout() || gameState !== "playing") return;
+
+  const threats = voyageThreats();
   // Only one pirate ship on the water at a time: a raider waits until the
   // CPU pirate has sunk and no other raider is still afloat.
   const livePirates = (game.ai && !game.ai.capsized ? 1 : 0) + game.pirateRaiders.filter((r) => !r.capsized).length;
-  if (game.elapsed >= game.nextRaiderSpawnAt && game.pirateRaiders.length < levelConfig.raiderCap && livePirates === 0 && threatSlotOpen()) {
+  if (game.elapsed >= game.nextRaiderSpawnAt && game.pirateRaiders.length < threats.raiderCap && livePirates === 0 && threatSlotOpen()) {
     claimThreatSlot();
     spawnPirateRaider();
-    game.nextRaiderSpawnAt = game.elapsed + randomInterval(levelConfig.raiderInterval);
+    game.nextRaiderSpawnAt = game.elapsed + randomInterval(threats.raiderInterval);
   }
 
   for (let i = game.pirateRaiders.length - 1; i >= 0; i -= 1) {
@@ -4299,6 +5022,11 @@ function pirateDangerAt(ship, px, py, t, prey, opts = {}) {
   const land = landClearance(px, py);
   if (land < ship.radius + 4 && land < landClearance(ship.x, ship.y) - 1) return { cost: 30, blocked: true };
   if (land < ship.radius + 14) cost += 6;
+  // Mission banks and the waterfall, judged the same way.
+  const bank = terrainDepth(px, py);
+  if (bank < ship.radius + 4 && bank < terrainDepth(ship.x, ship.y) - 1) return { cost: 30, blocked: true };
+  if (bank < ship.radius + 26) cost += 2.5;
+  if (fallsAt(px, py)?.along > -260) return { cost: 30, blocked: true };
 
   function zone(cx, cy, radius, weight) {
     const d = Math.hypot(px - cx, py - cy);
@@ -4598,12 +5326,18 @@ function routeLineIsClear(ship, ax, ay, bx, by) {
     const t = clamp(((hz.x - ax) * dx + (hz.y - ay) * dy) / len2, 0, 1);
     if (Math.hypot(ax + dx * t - hz.x, ay + dy * t - hz.y) < clearance) return false;
   }
+  if (game.mission) {
+    const steps = Math.ceil(Math.sqrt(len2) / 40);
+    for (let i = 1; i < steps; i += 1) {
+      if (terrainDepth(ax + (dx * i) / steps, ay + (dy * i) / steps) < ship.radius + 10) return false;
+    }
+  }
   return true;
 }
 
 // A* over a 40 px grid. Cells too close to a hazard are blocked; cells in a
 // hazard's damage zone cost extra, so the route skirts them where it can.
-function planPirateRoute(ship, goal) {
+function planPirateRoute(ship, goal, avoid = []) {
   const cellIndex = (x, y) =>
     clamp(Math.floor(y / ROUTE_CELL), 0, ROUTE_ROWS - 1) * ROUTE_COLS + clamp(Math.floor(x / ROUTE_CELL), 0, ROUTE_COLS - 1);
   const center = (i) => ({ x: ((i % ROUTE_COLS) + 0.5) * ROUTE_CELL, y: (Math.floor(i / ROUTE_COLS) + 0.5) * ROUTE_CELL });
@@ -4620,6 +5354,12 @@ function planPirateRoute(ship, goal) {
       if (d < routeClearance(ship, hz)) blocked[i] = 1;
       else if (d < hz.danger + ship.radius) penalty[i] += ROUTE_CELL * 2;
     }
+    for (const o of avoid) if (Math.hypot(c.x - o.x, c.y - o.y) < o.r) penalty[i] += ROUTE_CELL * 6;
+    if (game.mission) {
+      const bank = terrainDepth(c.x, c.y);
+      if (bank < ship.radius + 12 || fallsAt(c.x, c.y)?.along > -260) blocked[i] = 1;
+      else if (bank < ship.radius + 45) penalty[i] += ROUTE_CELL;
+    }
   }
   blocked[start] = 0;
   blocked[end] = 0;
@@ -4634,11 +5374,14 @@ function planPirateRoute(ship, goal) {
     const c = center(i);
     return Math.hypot(c.x - goalC.x, c.y - goalC.y);
   };
+  // cost so far + straight distance left, kept per cell so the search doesn't work it out again and again
+  const score = new Float32Array(total);
+  score[start] = guess(start);
 
   while (open.length) {
     let bestAt = 0;
     for (let k = 1; k < open.length; k += 1) {
-      if (cost[open[k]] + guess(open[k]) < cost[open[bestAt]] + guess(open[bestAt])) bestAt = k;
+      if (score[open[k]] < score[open[bestAt]]) bestAt = k;
     }
     const cur = open.splice(bestAt, 1)[0];
     if (cur === end) break;
@@ -4659,6 +5402,7 @@ function planPirateRoute(ship, goal) {
         if (cost[cur] + step < cost[next]) {
           cost[next] = cost[cur] + step;
           from[next] = cur;
+          score[next] = cost[next] + guess(next);
           open.push(next);
         }
       }
@@ -4800,6 +5544,12 @@ function keepEnemiesOutOfHarbours() {
 const BOARD_STANDOFF = 56;
 const BOARD_ANCHOR_RANGE = 70;
 
+// How far (centre to centre) the pirate keeps off its prey: `least`, or more
+// when the two hulls bow to stern need it, but always within cannon range (84).
+function pirateStandoff(pirate, prey, least) {
+  return Math.min(82, Math.max(least, shipHalfLength(pirate) + shipHalfLength(prey) + 4));
+}
+
 // Once the prey has surrendered, the pirate sails up beside it on its own
 // side, drops anchor and holds station while it plunders. It doesn't stop
 // for a ship that is still under way, and it doesn't aim or fire here: if the
@@ -4809,12 +5559,13 @@ function boardingInput(aiShip, prey, gap, dt) {
   const awayX = aiShip.x - prey.x;
   const awayY = aiShip.y - prey.y;
   const len = Math.hypot(awayX, awayY) || 1;
+  const off = pirateStandoff(aiShip, prey, BOARD_STANDOFF);
   const goal = {
-    x: prey.x + (awayX / len) * BOARD_STANDOFF,
-    y: prey.y + (awayY / len) * BOARD_STANDOFF
+    x: prey.x + (awayX / len) * off,
+    y: prey.y + (awayY / len) * off
   };
 
-  if (!director.anchored && gap < BOARD_ANCHOR_RANGE) {
+  if (!director.anchored && gap < pirateStandoff(aiShip, prey, BOARD_ANCHOR_RANGE)) {
     director.anchored = true;
     pirateCallout(aiShip, "Anchors down! Stand by to be boarded!");
   } else if (director.anchored && gap > PLUNDER_RANGE) {
@@ -4903,9 +5654,10 @@ function aiInput(aiShip, targetShip, dt) {
       const underWay = Math.abs(targetShip.speed) >= SURRENDER_SPEED;
       const fromX = underWay ? -Math.cos(targetShip.angle) : awayX / gap;
       const fromY = underWay ? -Math.sin(targetShip.angle) : awayY / gap;
+      const off = pirateStandoff(aiShip, targetShip, 66);
       goal = {
-        x: targetShip.x + fromX * 66,
-        y: targetShip.y + fromY * 66
+        x: targetShip.x + fromX * off,
+        y: targetShip.y + fromY * off
       };
       arrive = true;
       aim = true;
@@ -4943,7 +5695,7 @@ function aiInput(aiShip, targetShip, dt) {
     // back water to kill leftover way, creep in if just out of range, and
     // back off (bow on the prey, so reversing opens the gap) if too close.
     const aimErr = normalizeAngle(Math.atan2(targetShip.y - aiShip.y, targetShip.x - aiShip.x) - aiShip.angle);
-    const creepIn = preyGap > 78 && preyGap < 140 && Math.abs(aimErr) < 0.3 && aiShip.speed < 30;
+    const creepIn = preyGap > pirateStandoff(aiShip, targetShip, 78) &&preyGap < 140 && Math.abs(aimErr) < 0.3 && aiShip.speed < 30;
     const backOff = preyGap < 52 && Math.abs(aimErr) < 1.2;
     const canReverse = pirateSternIsClear(aiShip, targetShip);
     return {
@@ -5011,9 +5763,9 @@ function pickPatrolPoint(aiShip, prey) {
 
 // Arrived: berthed (at anchor) in Harbour B's berthing ring. Coming to rest
 // in the ring anchors the ship by itself (or R / comma), and that completes
-// the level; sailing through the ring without stopping doesn't.
+// the crossing or mission; sailing through the ring without stopping doesn't.
 function nearHarbourB(ship) {
-  // Only once the ship is berthed and all four lines are fast.
+  // Only once the ship is berthed and all the lines are fast.
   return ship && !ship.capsized && ship.anchored && ship.ropes >= 1 && berthedHarbour(ship) === HarbourB;
 }
 
@@ -5177,11 +5929,12 @@ function spawnSeaCreature() {
 function updateSeaCreatures(dt) {
   if (gameState !== "playing") return;
 
-  const levelConfig = getLevelConfig(game.level);
-  if (game.elapsed >= game.nextCreatureSpawnAt && game.seaCreatures.length < levelConfig.creatureCap && threatSlotOpen()) {
+  const threats = voyageThreats();
+  const monsters = game.seaCreatures.filter((c) => !c.variant).length;
+  if (game.elapsed >= game.nextCreatureSpawnAt && monsters < threats.creatureCap && threatSlotOpen()) {
     claimThreatSlot();
     spawnSeaCreature();
-    game.nextCreatureSpawnAt = game.elapsed + randomInterval(levelConfig.creatureInterval);
+    game.nextCreatureSpawnAt = game.elapsed + randomInterval(threats.creatureInterval);
   }
 
   for (let i = game.seaCreatures.length - 1; i >= 0; i -= 1) {
@@ -5213,6 +5966,8 @@ function updateSeaCreatures(dt) {
       }
     }
 
+    if (creature.variant === "croc") target = crocGoal(creature, prey);
+
     const desired = Math.atan2(target.y - creature.y, target.x - creature.x);
     const wobble = Math.sin(game.elapsed * 2.4 + creature.motionSeed) * 0.35;
     const err = normalizeAngle(desired + wobble - creature.angle);
@@ -5232,8 +5987,9 @@ function updateSeaCreatures(dt) {
       if (hit < 0) continue;
       bumpSound(ship, creature, hit);
       if (creature.attackCooldown <= 0 && !safeInHarbour(ship)) {
-        damageShip(ship, 34, "sea creature strike");
-        creature.attackCooldown = 1.35;
+        const croc = creature.variant === "croc";
+        damageShip(ship, croc ? 12 : 34, croc ? "sea creature strike (crocodile)" : "sea creature strike");
+        creature.attackCooldown = croc ? 2.5 : 1.35;
       }
     }
   }
@@ -5405,7 +6161,7 @@ function updateJet(ship, jet, dt) {
   switch (jet.state) {
     case "parked": {
       if (now < jet.readyAt || ship.capsized || ship.anchored || safeInHarbour(ship)) return;
-      const pirate = nearestPirate(ship, JET.patrolRange);
+      const pirate = nearestPirate(ship, JET.patrolRange * (1 + 0.25 * crewSkill(ship, "airboss")));
       if (!pirate) return;
       Object.assign(jet, { target: pirate, hostile: false, warnings: 0, hp: JET.hp });
       go("taxi");
@@ -5422,6 +6178,7 @@ function updateJet(ship, jet, dt) {
       if (jet.t >= JET.spoolTime) {
         go("catapult");
         playJetLaunch(ship.x, ship.y);
+        crewGain(ship, "airboss", 30);
       }
       return;
     case "catapult":
@@ -5438,7 +6195,7 @@ function updateJet(ship, jet, dt) {
     case "taxiBack":
       if (jet.t >= JET.taxiBackTime) {
         go("parked");
-        jet.readyAt = now + JET.cooldown;
+        jet.readyAt = now + JET.cooldown * (1 - 0.5 * crewSkill(ship, "airboss"));
       }
       return;
     case "down":
@@ -5451,7 +6208,7 @@ function updateJet(ship, jet, dt) {
         playExplosion(jet.x, jet.y, 0.7);
         game.jetBursts.push({ x: jet.x, y: jet.y, age: 0, big: true });
         go("lost");
-        jet.readyAt = now + JET.replaceTime;
+        jet.readyAt = now + JET.replaceTime * (1 - 0.5 * crewSkill(ship, "airboss"));
       }
       return;
     case "lost":
@@ -5469,7 +6226,7 @@ function updateJet(ship, jet, dt) {
   const target = jet.target && !jet.target.capsized && jetPirates().includes(jet.target) ? jet.target : null;
   if (target && (dist(target, ship) < JET.redLine || target.attackedPlayerAt > now - 6)) jet.hostile = true;
   const homeward = jet.state === "return" || jet.state === "final";
-  if (!homeward && (!target || jet.fuel <= 0 || ship.capsized || dist(target, ship) > JET.patrolRange * 1.4)) {
+  if (!homeward && (!target || jet.fuel <= 0 || ship.capsized || dist(target, ship) > JET.patrolRange * 1.4 * (1 + 0.25 * crewSkill(ship, "airboss")))) {
     go("return");
     if (target && jet.fuel <= 0) say("Jet low on fuel: coming back to the carrier");
   }
@@ -5722,6 +6479,7 @@ function updateMissiles(dt) {
 // Islands, the volcano, and icebergs are solid: a torpedo/sonic shot that
 // flies into one detonates on impact instead of passing through.
 function missileBlockedByTerrain(m) {
+  if (terrainDepth(m.x, m.y) < -12) return true;
   for (const hz of hazards) {
     if (dist(m, hz) <= hz.r) return true;
   }
@@ -5734,6 +6492,7 @@ function missileBlockedByTerrain(m) {
 // instant-capsize on contact, but these entities have no such damage model,
 // so instead they're just shoved back out to the hazard's solid edge.
 function blockEntityFromHazards(entity) {
+  if (game.mission) keepAfloat(entity, entity.radius || 14);
   for (const hz of hazards) {
     const dx = entity.x - hz.x;
     const dy = entity.y - hz.y;
@@ -5919,7 +6678,7 @@ function rockLands(rock) {
     if (ship.isHuman) {
       setUiMessage(ship.owned && ship.owned.fireFighting
         ? `${ship.playerName} is on fire! Press ${keyName(game.settings.keybinds[ship.playerSlot + "Fire"])} to put it out`
-        : `${ship.playerName} is on fire! (Fire Fighting Equipment in the Shop puts it out)`);
+        : `${ship.playerName} is on fire! (Fire Fighting Equipment from the Dockyard puts it out)`);
     }
   }
   playRockImpact(rock.tx, rock.ty, hitSomething);
@@ -5937,6 +6696,8 @@ function putOutFire(ship) {
   if (!ship.fire) return;
   ship.fire = null;
   ship.fireOutAt = natureClock; // the 3D view puffs steam
+  crewGain(ship, "bosun", 25);
+  crewGain(ship, "pump", 25);
   playFireOut(ship.x, ship.y);
 }
 
@@ -5945,7 +6706,7 @@ function extinguishFireForSlot(slot) {
   const ship = slot === "p2" ? game.player2 : game.player1;
   if (!ship || !ship.fire || ship.capsized) return;
   if (!ship.owned || !ship.owned.fireFighting) {
-    setUiMessage("No Fire Fighting Equipment on board. Buy it in the Shop.");
+    setUiMessage("No Fire Fighting Equipment on board. Buy it in the Dockyard.");
     playUiError();
     return;
   }
@@ -5965,7 +6726,7 @@ function soundDeterrentForSlot(slot) {
   const ship = slot === "p2" ? game.player2 : game.player1;
   if (!ship || ship.capsized) return;
   if (!ship.owned || !ship.owned.acousticDeterrent) {
-    setUiMessage("No Acoustic Deterrent on board. Buy it in the Shop.");
+    setUiMessage("No Acoustic Deterrent on board. Buy it in the Dockyard.");
     playUiError();
     return;
   }
@@ -6038,7 +6799,10 @@ function updateEruptionDamage(dt) {
     const fire = ship.fire;
     fire.inRain = shipInRain(ship);
     if (fire.inRain) fire.intensity = Math.max(1, fire.intensity - RAIN_FIRE_DAMPING_PER_SEC * dt);
-    else fire.intensity = Math.min(FIRE_MAX_INTENSITY, fire.intensity + FIRE_SPREAD_PER_SEC * dt);
+    else {
+      const party = Math.max(crewSkill(ship, "bosun"), crewSkill(ship, "pump"));
+      fire.intensity = Math.min(FIRE_MAX_INTENSITY, fire.intensity + FIRE_SPREAD_PER_SEC * (1 - 0.5 * party) * dt);
+    }
     // Scorching stays on the hull after the fire is out (shown in 3D and 2D).
     ship.burn = Math.min(1, (ship.burn || 0) + dt * 0.05 * fire.intensity);
     // Steady burning shouldn't trigger the red "just hit" flash every frame.
@@ -6087,8 +6851,9 @@ let fogBanks = [];
 let nextFogAt = Infinity; // set when a round starts (resetGame)
 
 function startFogForRound() {
-  fogBanks = [];
-  nextFogAt = natureClock + FOG_FIRST[0] + Math.random() * (FOG_FIRST[1] - FOG_FIRST[0]);
+  // A mission's own mist stays where it is; otherwise banks come and go.
+  fogBanks = (game.mission?.fog || []).map(([x, y, r]) => ({ x, y, r, vx: 0, vy: 0, age: FOG_FADE, hold: 1e9, density: 1, seed: Math.random() * 100, fixed: true }));
+  nextFogAt = game.mission ? Infinity : natureClock + FOG_FIRST[0] + Math.random() * (FOG_FIRST[1] - FOG_FIRST[0]);
 }
 
 function smooth01(x) {
@@ -6117,8 +6882,9 @@ function updateFogBanks(dt) {
   for (let i = fogBanks.length - 1; i >= 0; i -= 1) {
     const bank = fogBanks[i];
     bank.age += dt;
-    bank.x += (bank.vx + game.wind.x * FOG_WIND_SHARE) * dt;
-    bank.y += (bank.vy + game.wind.y * FOG_WIND_SHARE) * dt;
+    const drift = bank.fixed ? 0 : dt;
+    bank.x += (bank.vx + game.wind.x * FOG_WIND_SHARE) * drift;
+    bank.y += (bank.vy + game.wind.y * FOG_WIND_SHARE) * drift;
     const out = bank.age - FOG_FADE - bank.hold;
     bank.density = bank.age < FOG_FADE ? smooth01(bank.age / FOG_FADE) : out < 0 ? 1 : 1 - smooth01(out / FOG_FADE);
     const gone = bank.x < -bank.r || bank.y < -bank.r || bank.x > WORLD_W + bank.r || bank.y > WORLD_H + bank.r;
@@ -6175,7 +6941,8 @@ function updateNature(dt) {
     }
     if (natureClock >= hz.nextEruptAt) {
       hz.eruptAt = natureClock;
-      hz.nextEruptAt = natureClock + 24 + Math.random() * 22;
+      // a mission's great eruption keeps them blowing
+      hz.nextEruptAt = natureClock + (hz.fury ? 7 + Math.random() * 7 : 24 + Math.random() * 22);
       if (audible) playEruption(hz.x, hz.y);
     }
     // 0..1: rises while it rumbles, peaks at the blast, then dies down.
@@ -6227,7 +6994,7 @@ function handleGameLogic(dt) {
     updateAnchor(game.player2);
     updateMooring(game.player2, dt);
     applyMovement(game.player2, p2Input, dt);
-  } else {
+  } else if (game.ai) {
     const ai = braceForTsunami(game.ai, aiInput(game.ai, game.player1, dt));
     applyMovement(game.ai, ai, dt);
   }
@@ -6242,16 +7009,20 @@ function handleGameLogic(dt) {
   updateLandCollisions();
   updatePirateRaiders(dt);
   updateTows(dt);
+  updateGalley(dt);
   updateSeaCreatures(dt);
   updateUnderwaterEnemies(dt);
   keepEnemiesOutOfHarbours();
   updateMissiles(dt);
   updateCarrierJets(dt);
+  updateMission(dt);
+  if (gameState !== "playing") return; // the mission ran out of time
   updateEruptionDamage(dt);
   updateScore(dt);
   updateFloatingScores(dt);
   updateTargetAlerts(dt);
   updateLookout();
+  crewUpdate(dt);
 
   processHazards(game.player1, dt);
   processHazards(game.player2, dt);
@@ -6271,26 +7042,35 @@ function handleGameLogic(dt) {
   }
 
   for (const ship of humanShips()) {
-    if (!ship.capsized && nearHarbourB(ship) && game.elapsed > ship.nextDockAwardAt) {
-      awardScore(ship, 50, "Harbour-delivery");
+    if (!ship.capsized && nearHarbourB(ship) && game.elapsed > ship.nextDockAwardAt && (!game.mission || missionReady())) {
+      awardScore(ship, 50 + crewDelivery(ship), "Harbour-delivery");
       playShipHorn();
-      const arrivalSound = playLevelComplete(); // seconds, 0 if sound is off
-      startNextLevel();
+      const arrivalSound = playArrival(); // seconds, 0 if sound is off
+      if (game.mission) {
+        endMission(true, `Mission complete: ${game.mission.name}`);
+        return;
+      }
+      startNextCrossing();
       // Keys are ignored until the arrival music (and horn) has finished.
       // Measured on the real clock: the music keeps playing while the game is
       // in the background, but the game's own clock stops there.
-      if (game.levelTransition) {
-        game.levelTransition.readyAt = performance.now() + (arrivalSound > 0 ? Math.max(1.3, arrivalSound) : 0) * 1000;
+      if (game.arrival) {
+        game.arrival.readyAt = performance.now() + (arrivalSound > 0 ? Math.max(1.3, arrivalSound) : 0) * 1000;
       }
       return;
     }
   }
 
   if (humanShips().every((ship) => ship.capsized)) {
+    // In 3D, first watch her go down under the sea.
+    if (view3d.active && humanShips().some((ship) => game.elapsed - ship.sankAt < SINK_SCENE_TIME)) return;
     commitRoundScores();
     gameState = "ended";
     stopLookout();
-    resultText = "All player ships capsized";
+    const overFalls = humanShips().some((ship) => ship.overFalls !== undefined);
+    resultText = game.mission
+      ? `Mission failed: ${game.mission.name} - ${overFalls ? "swept over the waterfall" : capsizedMessage().toLowerCase()}`
+      : capsizedMessage();
   }
 }
 
@@ -6329,13 +7109,14 @@ function lavaPattern2d() {
 // Fighting Equipment) or a warning that the ship will burn down. In split
 // screen each prompt sits in its player's half; otherwise they stack.
 // Inside Harbour B's berthing ring and not yet anchored: a banner telling the
-// captain to drop anchor, which completes the level. It pulses until they
+// captain to drop anchor, which completes the voyage. It pulses until they
 // do. In split screen it sits in that player's half.
 function drawBerthPrompts() {
   if (gameState !== "playing") return;
   const split = view3d.active && view3d.split;
   for (const ship of humanShips()) {
     if (!ship || ship.capsized || (ship.anchored && ship.ropes >= 1) || berthedHarbour(ship) !== HarbourB) continue;
+    if (!ship.anchored && carrackPort(ship)) continue; // she is towed in (drawTowPrompts)
     const p2 = ship.playerSlot === "p2";
     const cx = split ? (p2 ? (WIDTH * 3) / 4 : WIDTH / 4) : WIDTH / 2;
     const cy = HEIGHT - 150 - (!split && p2 ? 70 : 0);
@@ -6354,12 +7135,13 @@ function drawBerthPrompts() {
     const who = mode === "local" ? `${ship.playerName}: ` : "";
     const key = ANCHOR_KEY_NAMES[ship.playerSlot];
     const berthed = atBerth(ship);
-    ctx.fillText(ship.anchored ? `${who}MAKING FAST - THE LEVEL ENDS WHEN THE LINES ARE SECURE` : berthed ? `${who}HARBOUR B - DROP ANCHOR TO FINISH THE LEVEL` : `${who}HARBOUR B - BRING THE SHIP ALONGSIDE ITS BERTH`, cx, cy - 6);
+    const unfinished = game.mission && !missionReady();
+    ctx.fillText(unfinished ? `${who}HARBOUR B - FINISH YOUR OBJECTIVES FIRST` : ship.anchored ? `${who}MAKING FAST - YOU ARRIVE WHEN THE LINES ARE SECURE` : berthed ? `${who}HARBOUR B - DROP ANCHOR TO FINISH` : `${who}HARBOUR B - BRING THE SHIP ALONGSIDE ITS BERTH`, cx, cy - 6);
     ctx.font = "15px Segoe UI";
     ctx.fillStyle = ship.anchored || (berthed && slowEnough) ? "#9dffb4" : "#ffd9a8";
     ctx.fillText(
-      ship.anchored ? "Hold on: the four mooring lines are being made fast" :
-      !berthed ? "Steer along the quay to the marked berth, bow to the sea, then slow down" :
+      ship.anchored ? "Hold on: the mooring lines are being made fast" :
+      !berthed ? "Steer into the marked berth, alongside the quay, then slow down" :
       slowEnough ? `Press ${key} to anchor now (or come to rest)` : `Ease off the engine and slow down, then press ${key}`,
       cx, cy + 20);
     ctx.restore();
@@ -6415,7 +7197,7 @@ function drawPlayersOut() {
     if (age < OUT_NOTICE_TIME) {
       ctx.globalAlpha = clamp(Math.min(age * 3, (OUT_NOTICE_TIME - age) * 2), 0, 1);
       const w = split ? WIDTH / 2 - 60 : 560;
-      const cy = HEIGHT / 2 - 90;
+      const cy = split ? HEIGHT - 190 : HEIGHT / 2 - 90; // in split screen, below the wreck
       ctx.fillStyle = "rgba(10, 20, 32, 0.86)";
       ctx.fillRect(cx - w / 2, cy - 40, w, 80);
       ctx.strokeStyle = "rgba(255, 120, 100, 0.9)";
@@ -6423,7 +7205,7 @@ function drawPlayersOut() {
       ctx.strokeRect(cx - w / 2, cy - 40, w, 80);
       ctx.fillStyle = "#ffd9d0";
       ctx.font = "bold 24px Segoe UI";
-      ctx.fillText("SHIP SUNK", cx, cy - 8);
+      ctx.fillText("SHIP CAPSIZED", cx, cy - 8);
       ctx.font = "17px Segoe UI";
       ctx.fillStyle = "#f2f6f9";
       ctx.fillText(`${playerLabel(ship)} is out of the game`, cx, cy + 22);
@@ -6448,7 +7230,10 @@ function drawFirePrompts() {
   burning.forEach((ship, i) => {
     const p2 = ship.playerSlot === "p2";
     const cx = split ? (p2 ? (WIDTH * 3) / 4 : WIDTH / 4) : WIDTH / 2;
-    const cy = 96 + (split ? 0 : i * 62);
+    // under whatever else is at the top: the bridge's instruments or the mission panel
+    const bridge = view3d.active && game.settings.cameraView === "bridge";
+    const panel = game.mission && !bridge && !split ? missionPanelRect() : null;
+    const cy = (bridge ? 150 : panel ? panel.y + panel.h + 34 : 100) + (split ? 0 : i * 62);
     const kit = ship.owned && ship.owned.fireFighting;
     const w = split ? WIDTH / 2 - 40 : 560;
     ctx.fillStyle = `rgba(120, 18, 8, ${0.82 * pulse + 0.1})`;
@@ -6602,7 +7387,8 @@ function drawNight2d() {
 }
 
 // Navigation lights in the classic 2D view: red to port, green to
-// starboard, white at the stern; the pirate's candle flickers amber.
+// starboard, white at the stern; the pirate's candle flickers amber. The
+// carrack has no navigation lights, only her candle.
 function drawNavLights2d(ship) {
   const dot = (x, y, color, r) => {
     ctx.fillStyle = color;
@@ -6610,10 +7396,13 @@ function drawNavLights2d(ship) {
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
   };
-  dot(4, -8, "#ff3b30", 2.4);
-  dot(4, 8, "#38ff6a", 2.4);
-  dot(-12, 0, "#ffffff", 2);
-  if (ship.type === "pirate") {
+  const carrack = ship.category === "Carrack";
+  if (!carrack) {
+    dot(4, -8, "#ff3b30", 2.4);
+    dot(4, 8, "#38ff6a", 2.4);
+    dot(-12, 0, "#ffffff", 2);
+  }
+  if (ship.type === "pirate" || carrack) {
     const t = performance.now() / 1000;
     const flick = 0.65 + 0.2 * Math.sin(t * 13) + 0.15 * Math.sin(t * 31 + 1.3);
     dot(-6, 0, `rgba(255, 180, 70, ${0.35 * flick})`, 7);
@@ -6817,37 +7606,15 @@ function drawWaterSpouts() {
   drawWaterSpout(waterSpout);
 }
 
-// Screen area the main menu's title, panel and help lines take up; harbour
-// labels step aside from it instead of sliding underneath.
-const MENU_KEEP_CLEAR = { x: 330, y: 105, w: 735, h: 520 };
-
 function drawHarbours() {
-  ctx.font = "18px Segoe UI";
+  ctx.font = "bold 20px Segoe UI";
   for (const h of [HarbourA, HarbourB]) {
+    if (h === HarbourB && !harbourBSighted()) continue;
     const p = worldToScreen(h.x, h.y, 70);
     if (!p.visible) continue;
-    const w = ctx.measureText(h.name).width + 16;
-    const lh = 26;
-    // Centred over the harbour, but always fully on screen (in split
-    // screen: fully inside its own half).
-    let minX = 8;
-    let maxX = WIDTH - w - 8;
-    if (view3d.active && view3d.split) {
-      if (p.x < WIDTH / 2) maxX = WIDTH / 2 - w - 8;
-      else minX = WIDTH / 2 + 8;
-    }
-    let x = clamp(p.x - w / 2, minX, maxX);
-    let y = clamp(p.y - lh / 2, 8, HEIGHT - lh - 8);
-    const k = MENU_KEEP_CLEAR;
-    const overlapsMenu = gameState === "menu" && x < k.x + k.w && x + w > k.x && y < k.y + k.h && y + lh > k.y;
-    if (overlapsMenu) {
-      // Move to whichever side of the menu is nearer (and has room).
-      const left = k.x - w - 12;
-      const right = k.x + k.w + 12;
-      const roomRight = right + w <= WIDTH - 8;
-      x = left >= 8 && (!roomRight || Math.abs(p.x - (left + w / 2)) <= Math.abs(p.x - (right + w / 2))) ? left : right;
-      x = clamp(x, 8, WIDTH - w - 8);
-    }
+    const w = ctx.measureText(h.name).width + 18;
+    const lh = 30;
+    const { x, y } = placeLabel(p.x, p.y - lh / 2, w, lh);
     const moved = Math.hypot(x + w / 2 - p.x, y + lh / 2 - p.y) > 20;
     if (moved && p.x >= 0 && p.x <= WIDTH && p.y >= 0 && p.y <= HEIGHT) {
       // A thin line back to the harbour so it's clear what the label names.
@@ -6858,10 +7625,10 @@ function drawHarbours() {
       ctx.lineTo(p.x, p.y);
       ctx.stroke();
     }
-    ctx.fillStyle = "rgba(4, 18, 28, 0.55)";
+    ctx.fillStyle = "rgba(4, 18, 28, 0.6)";
     ctx.fillRect(x, y, w, lh);
     ctx.fillStyle = "#f2f8fb";
-    ctx.fillText(h.name, x + 8, y + 19);
+    ctx.fillText(h.name, x + 9, y + 22);
   }
 }
 
@@ -6876,11 +7643,16 @@ function landPath(p, s = 1, ox = 0, oy = 0) {
 
 const LAND_COLORS_2D = { coast: "#6f9a4e", mole: "#8a8780", moored: "#c9c2b0" };
 const SNOW_2D = "#e9f0f4";
+const LIMESTONE_2D = "#c2a874"; // the coast in the carrack's age
+
+function coastColor2d(modern) {
+  return oldEra() ? LIMESTONE_2D : game.polar ? SNOW_2D : modern;
+}
 
 function drawHarbourDiscs() {
   for (const p of HARBOUR_LAND) {
     landPath(p);
-    ctx.fillStyle = game.polar && p.kind === "coast" ? SNOW_2D : LAND_COLORS_2D[p.kind];
+    ctx.fillStyle = p.kind === "coast" ? coastColor2d(LAND_COLORS_2D.coast) : LAND_COLORS_2D[p.kind];
     ctx.fill();
   }
   for (const [h, color] of [[HarbourA, "rgba(47, 143, 98, 0.45)"], [HarbourB, "rgba(63, 111, 184, 0.45)"]]) {
@@ -6900,6 +7672,9 @@ function drawShip(ship, label) {
     ctx.restore();
   }
 
+  // No name label over a captain's wreck: the 3D view may be under water with it.
+  if (view3d.active && ship.capsized && ship.isHuman) return;
+
   // Seen from just behind (chase view) a label at mast height floats near the
   // horizon, far above the ship; attach it lower so it sits over the funnel.
   const followed = view3d.active && game.settings.cameraView !== "overview" &&
@@ -6908,16 +7683,21 @@ function drawShip(ship, label) {
   if (followed && game.settings.cameraView === "bridge") return;
   const top = view3d.active ? view3d.shipTop(ship) : 0;
   const p = worldToScreen(ship.x, ship.y, followed ? top * 0.65 : top + 6);
-  if (!p.visible) return;
+  // (a name just past the edge is pulled in; one far off stays off)
+  if (!p.visible || p.x < -250 || p.x > WIDTH + 250) return;
   const hpPct = clamp(ship.hp / (ship.maxHull || 100), 0, 1);
-  ctx.fillStyle = "rgba(17, 33, 47, 0.8)";
-  ctx.fillRect(p.x - 26, p.y - 30, 52, 7);
-  ctx.fillStyle = hpPct > 0.35 ? "#58cc7c" : "#f87254";
-  ctx.fillRect(p.x - 26, p.y - 30, 52 * hpPct, 7);
-
+  ctx.save();
+  ctx.font = "bold 17px Segoe UI";
+  ctx.textAlign = "center";
+  const box = placeLabel(p.x, p.y - 54, Math.max(66, ctx.measureText(label).width + 8), 32);
+  const cx = box.x + box.w / 2;
   ctx.fillStyle = "#ecf5f9";
-  ctx.font = "14px Segoe UI";
-  ctx.fillText(label, p.x - 22, p.y - 36);
+  outlinedText(label, cx, box.y + 17);
+  ctx.fillStyle = "rgba(17, 33, 47, 0.8)";
+  ctx.fillRect(cx - 32, box.y + 23, 64, 8);
+  ctx.fillStyle = hpPct > 0.35 ? "#58cc7c" : "#f87254";
+  ctx.fillRect(cx - 32, box.y + 23, 64 * hpPct, 8);
+  ctx.restore();
 }
 
 function drawShipFire2d(ship) {
@@ -7001,7 +7781,7 @@ function drawHosesAndRopes2d() {
       ctx.strokeRect(at.x - 6, at.y - 6, 12, 12);
     }
   }
-  for (const ship of humanShips()) {
+  for (const ship of game.galley ? [...humanShips(), game.galley.boat] : humanShips()) {
     const hose = pumpHose(ship);
     if (hose) {
       ctx.strokeStyle = hose.kind === "oil" ? "#1d1d1d" : "#f2f2f2";
@@ -7073,7 +7853,7 @@ function drawPirateCallout() {
 
 function drawPirateRaiders() {
   for (const raider of game.pirateRaiders) {
-    drawShip(raider, "Raider");
+    drawShip(raider, raider.shipName || "Raider");
   }
 }
 
@@ -7082,6 +7862,18 @@ function drawSeaCreatures() {
     ctx.save();
     ctx.translate(creature.x, creature.y);
     ctx.rotate(creature.angle);
+    if (creature.variant === "croc") {
+      ctx.fillStyle = "#8aa83a";
+      ctx.beginPath();
+      ctx.ellipse(-4, 0, 22, 7, 0, 0, Math.PI * 2);
+      ctx.ellipse(22, 0, 11, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffd23e";
+      ctx.fillRect(14, -5, 3, 3);
+      ctx.fillRect(14, 2, 3, 3);
+      ctx.restore();
+      continue;
+    }
     ctx.beginPath();
     ctx.ellipse(0, 0, creature.radius + 4, creature.radius, 0, 0, Math.PI * 2);
     ctx.fillStyle = "#9d5fc5";
@@ -7296,8 +8088,8 @@ function drawTargetAlerts() {
     ctx.strokeRect(p.x - 36, p.y - 36, 72, 72);
     ctx.shadowBlur = 0;
     ctx.fillStyle = "rgba(255, 90, 90, 0.95)";
-    ctx.font = "bold 16px Segoe UI";
-    ctx.fillText(alert.label, p.x - 44, p.y - 46);
+    ctx.font = "bold 19px Segoe UI";
+    ctx.fillText(alert.label, clamp(p.x - 44, 8, WIDTH - ctx.measureText(alert.label).width - 8), clamp(p.y - 46, 24, HEIGHT - 8));
     ctx.restore();
   }
 }
@@ -7449,16 +8241,41 @@ function drawCatalogIcon(entry, x, y, size, isShip = false) {
   ctx.restore();
 }
 
+const renamePopup = document.getElementById("renamePopup");
+const renameInput = document.getElementById("renameInput");
+let renameSlot = "p1";
+
 function renameShopProfile() {
-  const profile = getProfile(game.shopSlot);
-  const value = prompt("Enter player name", profile.name);
-  if (!value) return;
-  const nextName = value.trim().slice(0, 18);
-  if (!nextName) return;
-  profile.name = nextName;
+  renameSlot = game.shopSlot;
+  const profile = getProfile(renameSlot);
+  document.getElementById("renameLabel").textContent = `New name for ${profile.name} (${renameSlot.toUpperCase()})`;
+  renameInput.value = profile.name;
+  keys.clear();
+  playUiClick();
+  renamePopup.hidden = false;
+  renameInput.focus();
+  renameInput.select();
+}
+
+function closeRenamePopup(save) {
+  renamePopup.hidden = true;
+  renameInput.blur();
+  const nextName = renameInput.value.trim().slice(0, 18);
+  if (!save || !nextName) {
+    playUi("ui_back", { type: "triangle", from: 700, to: 420, dur: 0.12, peak: 0.09 });
+    return;
+  }
+  getProfile(renameSlot).name = nextName;
   saveProfiles();
   setUiMessage(`Renamed to ${nextName}`);
+  playUi("ui_confirm", { type: "triangle", from: 660, to: 990, dur: 0.14, peak: 0.1 });
 }
+
+document.getElementById("renameForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  closeRenamePopup(true);
+});
+document.getElementById("renameCancel").addEventListener("click", () => closeRenamePopup(false));
 
 // 2-player chase view: a line between the two halves and whose half is whose.
 function drawSplitDivider() {
@@ -7490,16 +8307,116 @@ function drawSplitDivider() {
   ctx.restore();
 }
 
+// The corner map grows and shrinks with its - and + buttons (or keys). The
+// largest step covers nearly half the screen.
+const MAP_SMALL_W = 220;
+const MAP_MEDIUM_W = 520;
+const MAP_SCREEN_SHARE = 0.47;
+const MAP_LARGEST_STEP = 2;
+const MAP_BUTTONS = { x: WIDTH - 144, y: HEIGHT - 205, w: 64, h: 61, gap: 6 };
+let mapStep = 0;
+
+function resizeMiniMap(by) {
+  mapStep = clamp(mapStep + by, 0, MAP_LARGEST_STEP);
+}
+
+function miniMapRect() {
+  const aspect = WORLD_W / WORLD_H;
+  if (mapStep === 0) {
+    const h = Math.round(MAP_SMALL_W / aspect);
+    return { x: WIDTH - MAP_SMALL_W - 10, y: HEIGHT - h - 10, w: MAP_SMALL_W, h };
+  }
+  const screen = canvas.getBoundingClientRect();
+  const k = Math.min(screen.width / WIDTH, screen.height / HEIGHT);
+  // Enlarged, it stops short of the touch buttons down the right-hand side.
+  const side = document.querySelector(".tc-side").getBoundingClientRect();
+  const right = side.width ? Math.min(WIDTH - 10, (side.left - screen.left - (screen.width - WIDTH * k) / 2) / k - 8) : WIDTH - 10;
+  const target = mapStep === 1 ? MAP_MEDIUM_W : Math.sqrt(MAP_SCREEN_SHARE * screen.width * screen.height * aspect) / k;
+  // It sits above the damage panels and below the status bar.
+  const bottom = HEIGHT - 88;
+  const w = Math.round(Math.min(target, (bottom - 66) * aspect, right - 10));
+  const h = Math.round(w / aspect);
+  return { x: right - w, y: bottom - h, w, h };
+}
+
+function drawMapButtons() {
+  const { x, y, w, h, gap } = MAP_BUTTONS;
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "bold 42px Segoe UI";
+  ctx.lineWidth = 1.5;
+  [["−", -1], ["+", 1]].forEach(([label, by], i) => {
+    const bx = x + i * (w + gap);
+    const usable = by < 0 ? mapStep > 0 : mapStep < MAP_LARGEST_STEP;
+    ctx.fillStyle = usable ? "rgba(10, 48, 70, 0.85)" : "rgba(40, 50, 58, 0.6)";
+    ctx.fillRect(bx, y, w, h);
+    ctx.strokeStyle = "rgba(217, 237, 247, 0.75)";
+    ctx.strokeRect(bx, y, w, h);
+    ctx.fillStyle = usable ? "#eef8fd" : "rgba(238, 248, 253, 0.35)";
+    ctx.fillText(label, bx + w / 2, y + h / 2);
+    registerUiRect(bx, y, w, h, () => resizeMiniMap(by));
+  });
+  ctx.restore();
+}
+
+// The dangers on the move, as they are right now: storm cells, a water spout,
+// lava on the water and the tsunami's front. (Sea monsters and submarines are
+// under water: they need Surface Radar, see drawCrewChart.)
+function drawMapDangers(mmX, mmY, mmW, mmH) {
+  const sx = mmW / WORLD_W;
+  const sy = mmH / WORLD_H;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(mmX, mmY, mmW, mmH);
+  ctx.clip();
+  const circle = (o, r) => {
+    ctx.beginPath();
+    ctx.arc(mmX + o.x * sx, mmY + o.y * sy, r, 0, Math.PI * 2);
+  };
+  ctx.lineWidth = 1.5;
+  ctx.fillStyle = "rgba(160, 170, 205, 0.45)";
+  ctx.strokeStyle = "#cfd6f2";
+  for (const dz of dynamicDangers) {
+    if (dz.arriveIn > 0) continue; // still over the horizon
+    circle(dz, Math.max(4, dz.r * sx));
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#ff8a1e";
+  for (const pool of game.lavaPools) {
+    circle(pool, Math.max(1.5, pool.size * sx));
+    ctx.fill();
+  }
+  if (waterSpout.state !== "dormant") {
+    ctx.strokeStyle = ctx.fillStyle = "#ffffff";
+    circle(waterSpout, Math.max(5, waterSpout.r * sx));
+    ctx.stroke();
+    circle(waterSpout, 2);
+    ctx.fill();
+  }
+  if (tsunami.state !== "dormant") {
+    // the front lies across the way the wave travels (held at the edge until it comes on)
+    const along = tsunami.dirX !== 0;
+    const at = clamp(tsunami.front * (along ? tsunami.dirX : tsunami.dirY), 0, along ? WORLD_W : WORLD_H);
+    ctx.strokeStyle = "#ff5a4d";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(mmX + (along ? at * sx : 0), mmY + (along ? 0 : at * sy));
+    ctx.lineTo(mmX + (along ? at * sx : mmW), mmY + (along ? mmH : at * sy));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawMiniMap() {
-  const mmW = 220;
-  const mmH = 128;
-  const mmX = WIDTH - mmW - 10;
-  const mmY = HEIGHT - mmH - 10;
+  const { x: mmX, y: mmY, w: mmW, h: mmH } = miniMapRect();
 
   const sx = mmW / WORLD_W;
   const sy = mmH / WORLD_H;
 
-  ctx.fillStyle = "rgba(7, 24, 35, 0.54)";
+  // Enlarged it is more solid, so the chart reads clearly over the view.
+  ctx.fillStyle = mapStep ? "rgba(7, 24, 35, 0.8)" : "rgba(7, 24, 35, 0.54)";
   ctx.fillRect(mmX, mmY, mmW, mmH);
   ctx.strokeStyle = "rgba(217, 237, 247, 0.75)";
   ctx.lineWidth = 1.5;
@@ -7509,30 +8426,34 @@ function drawMiniMap() {
   ctx.beginPath();
   ctx.rect(mmX, mmY, mmW, mmH);
   ctx.clip();
+  if (game.missionState) ctx.drawImage(game.missionState.seenChart, mmX, mmY, mmW, mmH);
+  const harbours = harbourBSighted() ? [HarbourA, HarbourB] : [HarbourA];
   for (const p of HARBOUR_LAND) {
-    if (p.kind === "moored") continue;
+    if (p.kind === "moored" || !harbours.includes(p.harbour)) continue;
     ctx.save();
     ctx.translate(mmX, mmY);
     ctx.scale(sx, sy);
     landPath(p);
     ctx.restore();
-    ctx.fillStyle = p.kind === "coast" ? (game.polar ? SNOW_2D : "#5f8a43") : "#8a8780";
+    ctx.fillStyle = p.kind === "coast" ? coastColor2d("#5f8a43") : "#8a8780";
     ctx.fill();
   }
   ctx.restore();
-  for (const [h, color] of [[HarbourA, "#2f8f62"], [HarbourB, "#3f6fb8"]]) {
+  for (const h of harbours) {
     ctx.beginPath();
     ctx.arc(mmX + h.x * sx, mmY + h.y * sy, Math.max(3, h.r * sx), 0, Math.PI * 2);
-    ctx.fillStyle = color;
+    ctx.fillStyle = h === HarbourA ? "#2f8f62" : "#3f6fb8";
     ctx.fill();
   }
 
   for (const s of game.iceSheets) {
+    if (game.mission && !s.seen) continue;
     ctx.drawImage(s.canvas, mmX + (s.x - s.r) * sx, mmY + (s.y - s.r) * sy, s.r * 2 * sx, s.r * 2 * sy);
   }
 
   const MINIMAP_HAZARD_COLORS = { island: "#7db86a", volcano: "#d2573a", iceberg: "#d5f4ff" };
   for (const hz of hazards) {
+    if (game.mission && !hz.seen) continue; // not sighted yet
     const x = mmX + hz.x * sx;
     const y = mmY + hz.y * sy;
     const r = Math.max(1.5, hz.r * sx);
@@ -7551,6 +8472,8 @@ function drawMiniMap() {
     const cx = mmX + whirlpool.x * sx;
     const cy = mmY + whirlpool.y * sy;
     const rr = Math.max(4, whirlpool.r * sx);
+    ctx.save();
+    ctx.globalAlpha *= clamp((WHIRLPOOL_LIFE - whirlpool.age) / WHIRLPOOL_FADE, 0, 1); // dies away with the pool
     ctx.strokeStyle = "#7fd8ff";
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -7565,16 +8488,21 @@ function drawMiniMap() {
       else ctx.lineTo(cx + Math.cos(a) * d, cy + Math.sin(a) * d);
     }
     ctx.stroke();
+    ctx.restore();
   }
+
+  drawMapDangers(mmX, mmY, mmW, mmH);
 
   const drawDot = (entity, color) => {
     if (!entity || entity.capsized) return;
     ctx.beginPath();
-    ctx.arc(mmX + entity.x * sx, mmY + entity.y * sy, 2.2, 0, Math.PI * 2);
+    ctx.arc(mmX + entity.x * sx, mmY + entity.y * sy, (2.2 * mmW) / MAP_SMALL_W, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
   };
 
+  drawMissionMapMarks(mmX, mmY, sx, sy);
+  drawCrewChart(mmX, mmY, sx, sy);
   drawDot(game.player1, game.player1 && game.player1.displayColor ? game.player1.displayColor : "#2f7ef7");
   drawDot(game.player2, game.player2 && game.player2.displayColor ? game.player2.displayColor : "#ffd56a");
   drawDot(game.ai, game.ai && game.ai.displayColor ? game.ai.displayColor : "#f0d034");
@@ -7585,19 +8513,20 @@ function drawMiniMap() {
   ctx.fillStyle = "#eef8fd";
   ctx.font = "12px Segoe UI";
   ctx.fillText("Map", mmX + 8, mmY + 15);
+  drawMapButtons();
 }
 
 function drawHud() {
-  ctx.fillStyle = "rgba(5, 17, 25, 0.34)";
-  ctx.fillRect(8, 8, mode === "local" ? 470 : 328, 46);
+  ctx.fillStyle = "rgba(5, 17, 25, 0.45)";
+  ctx.fillRect(8, 8, mode === "local" ? 496 : 370, 56);
   ctx.fillStyle = "#ecf5f9";
-  ctx.font = "14px Segoe UI";
-  ctx.fillText(`Mode ${mode === "single" ? "Single" : "Local"}  Lv ${game.level || 1}`, 16, 25);
-  ctx.fillText(`Time ${game.elapsed.toFixed(1)}s`, 140, 25);
-  ctx.fillText(`Wind ${game.wind.x.toFixed(0)},${game.wind.y.toFixed(0)}`, 236, 25);
-  ctx.fillText(`P1 HP ${Math.ceil(game.player1 ? game.player1.hp : 0)} | Pts ${getProfile("p1").points}`, 16, 43);
+  ctx.font = "bold 17px Segoe UI";
+  ctx.fillText(`${mode === "single" ? "Single" : "Local"}  ${game.mission ? "Mission" : "Free Play"}`, 16, 29);
+  ctx.fillText(`Time ${game.elapsed.toFixed(0)}s`, 178, 29);
+  ctx.fillText(`Wind ${game.wind.x.toFixed(0)},${game.wind.y.toFixed(0)}`, 278, 29);
+  ctx.fillText(`P1 HP ${Math.ceil(game.player1 ? game.player1.hp : 0)} | Pts ${getProfile("p1").points}`, 16, 54);
   if (mode === "local" && game.player2) {
-    ctx.fillText(`P2 HP ${Math.ceil(game.player2.hp)} | Pts ${getProfile("p2").points}`, 238, 43);
+    ctx.fillText(`P2 HP ${Math.ceil(game.player2.hp)} | Pts ${getProfile("p2").points}`, 260, 54);
   }
 
   const drawRepairWidget = (ship, slot, x, y, tint) => {
@@ -7611,69 +8540,69 @@ function drawHud() {
     ctx.fillStyle = "rgba(10, 38, 55, 0.66)";
     ctx.fillRect(x, y, 228, 44);
     ctx.strokeStyle = tint;
-    ctx.strokeRect(x, y, 228, 44);
+    ctx.strokeRect(x, y, 270, 72);
     ctx.fillStyle = "#e7f6ff";
-    ctx.font = "13px Segoe UI";
-    ctx.fillText(`${slot.toUpperCase()} Dmg ${Math.round(damage)} | Res ${reserveLeft}`, x + 8, y + 16);
-    ctx.fillText(activePlan ? `${activePlan.label} ${progress}%` : ship.anchored ? `At anchor (${ANCHOR_KEY_NAMES[slot]} to sail)` : ship.ropes > 0 ? "Casting off lines..." : ship.readyAt !== undefined && game.elapsed - ship.readyAt < READY_SIGNAL_TIME ? "READY TO SAIL" : (ship.repairLast || "Ready"), x + 8, y + 33);
+    ctx.font = "bold 15px Segoe UI";
+    ctx.fillText(`${slot.toUpperCase()} Dmg ${Math.round(damage)} | Res ${reserveLeft}`, x + 8, y + 21, 164);
+    ctx.fillText(`${profile.points} pts`, x + 8, y + 43, 164);
+    ctx.font = "15px Segoe UI";
+    ctx.fillText(activePlan ? `${activePlan.label} ${progress}%` : ship.anchored ? `At anchor (${ANCHOR_KEY_NAMES[slot]} to sail)` : ship.ropes > 0 ? "Casting off lines..." : ship.readyAt !== undefined && game.elapsed - ship.readyAt < READY_SIGNAL_TIME ? "READY TO SAIL" : (ship.repairLast || "Ready"), x + 8, y + 64, 164);
 
     const canRepair = damage > 0 && reserveLeft > 0 && !ship.capsized;
-    const btnX = x + 156;
-    const btnY = y + 22;
-    const btnW = 64;
-    const btnH = 18;
+    const btnX = x + 178;
+    const btnY = y + 8;
+    const btnW = 84;
+    const btnH = 56;
     ctx.fillStyle = canRepair ? "rgba(34, 114, 78, 0.95)" : "rgba(67, 74, 82, 0.7)";
     ctx.fillRect(btnX, btnY, btnW, btnH);
     ctx.strokeStyle = canRepair ? "rgba(204, 255, 226, 0.5)" : "rgba(181, 192, 203, 0.3)";
     ctx.strokeRect(btnX, btnY, btnW, btnH);
     ctx.fillStyle = "#f4fffa";
-    ctx.fillText("Fix", btnX + 18, btnY + 13);
+    ctx.font = "bold 24px Segoe UI";
+    ctx.fillText("Fix", btnX + 25, btnY + 37);
 
     if (canRepair) {
       registerUiRect(btnX, btnY, btnW, btnH, () => attemptRepairForSlot(slot));
     }
 
-    ctx.fillStyle = "#cde6f5";
-    ctx.fillText(`${profile.points} pts`, x + 158, y + 16);
-
     // On fire: a red bar above the panel, with the put-out button if the
     // ship carries Fire Fighting Equipment.
     if (ship.fire && !ship.capsized) {
-      const fy = y - 50; // above the message line
+      const fy = y - 44;
       const flicker = 0.75 + 0.25 * Math.sin(performance.now() / 90);
       ctx.fillStyle = `rgba(150, 30, 12, ${0.85 * flicker})`;
-      ctx.fillRect(x, fy, 228, 22);
+      ctx.fillRect(x, fy, 270, 40);
       ctx.strokeStyle = "rgba(255, 190, 120, 0.8)";
-      ctx.strokeRect(x, fy, 228, 22);
+      ctx.strokeRect(x, fy, 270, 40);
       ctx.fillStyle = "#fff1dc";
-      ctx.font = "bold 13px Segoe UI";
-      ctx.fillText("ON FIRE!", x + 8, fy + 15);
-      ctx.font = "12px Segoe UI";
+      ctx.font = "bold 16px Segoe UI";
+      ctx.fillText("ON FIRE!", x + 8, fy + 26);
       if (ship.owned && ship.owned.fireFighting) {
         const key = keyName(game.settings.keybinds[slot + "Fire"]);
         const bx = x + 96;
         ctx.fillStyle = "rgba(30, 110, 170, 0.95)";
-        ctx.fillRect(bx, fy + 2, 126, 18);
+        ctx.fillRect(bx, fy + 3, 170, 34);
         ctx.strokeStyle = "rgba(200, 235, 255, 0.7)";
-        ctx.strokeRect(bx, fy + 2, 126, 18);
+        ctx.strokeRect(bx, fy + 3, 170, 34);
         ctx.fillStyle = "#f4fbff";
-        ctx.fillText(`Put out fire (${key})`, bx + 12, fy + 15);
-        registerUiRect(bx, fy + 2, 126, 18, () => extinguishFireForSlot(slot));
+        ctx.fillText(`Put out fire (${key})`, bx + 10, fy + 26, 154);
+        registerUiRect(bx, fy + 3, 170, 34, () => extinguishFireForSlot(slot));
       } else {
-        ctx.fillText("Spreading - no fire kit (Shop)", x + 82, fy + 15);
+        ctx.font = "14px Segoe UI";
+        ctx.fillText("No fire kit (Dockyard)", x + 100, fy + 25, 164);
       }
     }
   };
 
-  drawRepairWidget(game.player1, "p1", 8, HEIGHT - 58, "rgba(151, 214, 255, 0.5)");
+  drawRepairWidget(game.player1, "p1", 8, HEIGHT - 80, "rgba(151, 214, 255, 0.5)");
   if (mode === "local" && game.player2) {
     // In split screen player 2's panel sits in player 2's (right) half.
-    drawRepairWidget(game.player2, "p2", view3d.active && view3d.split ? WIDTH / 2 + 8 : 244, HEIGHT - 58, "rgba(255, 218, 161, 0.5)");
+    drawRepairWidget(game.player2, "p2", view3d.active && view3d.split ? WIDTH / 2 + 8 : 286, HEIGHT - 80, "rgba(255, 218, 161, 0.5)");
   }
 
   ctx.fillStyle = "#ffd182";
   ctx.font = "12px Segoe UI";
-  {
+  if (!TOUCH_UI) {
     const k = (a) => keyName(game.settings.keybinds[a]);
     ctx.fillText(
       mode === "local"
@@ -7685,10 +8614,11 @@ function drawHud() {
   }
 
   if (game.uiMessage) {
-    ctx.fillStyle = "#d8f2ff";
-    ctx.font = "13px Segoe UI";
+    ctx.fillStyle = "#e4f6ff";
+    ctx.font = "bold 17px Segoe UI";
     const p2Half = game.uiMessageSlot === "p2" && view3d.active && view3d.split;
-    ctx.fillText(game.uiMessage, p2Half ? WIDTH / 2 + 14 : 14, HEIGHT - 68);
+    const burning = humanShips().some((ship) => ship.fire && !ship.capsized);
+    outlinedText(game.uiMessage, p2Half ? WIDTH / 2 + 14 : 14, HEIGHT - (burning ? 132 : 90));
   }
 }
 
@@ -7696,9 +8626,13 @@ function drawHud() {
 // heading, plus the gauges that kind of vessel would carry. Knots are scaled
 // to each type's real-world top speed, so a sailing boat flat out shows about
 // 8 kn and a hydrofoil about 42 kn.
-const BRIDGE_TOP_KNOTS = { Cruise: 22, Cargo: 18, Sailing: 8, Catamaran: 14, Assault: 28, Carrier: 32, Futuristic: 48, Hydrofoil: 42, Tug: 13, Icebreaker: 17, Tanker: 15, GasTanker: 19.5 };
+const BRIDGE_TOP_KNOTS = { Cruise: 22, Cargo: 18, Sailing: 8, Catamaran: 14, Assault: 28, Carrier: 32, Futuristic: 48, Hydrofoil: 42, Tug: 13, Icebreaker: 17, Tanker: 15, GasTanker: 19.5, WarTanker: 11, Carrack: 9, Galley: 7 };
+const WIND_SAILED = ["Sailing", "Catamaran", "Carrack"]; // their bridges show the wind and point of sail
 const WIND_KNOTS_PER_UNIT = 0.6; // game wind (up to about 34 units) -> about 20 kn
 const COMPASS_POINTS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+// The 32 points of a traditional compass card, clockwise from north (the carrack steers by these).
+const COMPASS_RHUMBS = ["N", "N BY E", "NNE", "NE BY N", "NE", "NE BY E", "ENE", "E BY N", "E", "E BY S", "ESE", "SE BY E", "SE", "SE BY S", "SSE", "S BY E",
+  "S", "S BY W", "SSW", "SW BY S", "SW", "SW BY W", "WSW", "W BY S", "W", "W BY N", "WNW", "NW BY W", "NW", "NW BY N", "NNW", "N BY W"];
 
 // Angle 0 points east on the map and angles turn clockwise; north is up.
 function compassBearing(angle) {
@@ -7727,11 +8661,18 @@ function bridgeGauges(ship) {
   const windKn = Math.hypot(game.wind.x, game.wind.y) * WIND_KNOTS_PER_UNIT;
   const side = Math.abs(rel) < 3 || Math.abs(rel) > 177 ? "" : rel < 0 ? " P" : " S";
 
-  if (kind === "Sailing" || kind === "Catamaran") {
+  if (WIND_SAILED.includes(kind)) {
     const off = Math.abs(rel);
     const pointOfSail = off < 40 ? "IN IRONS" : off < 65 ? "CLOSE-HAULED" : off < 110 ? "BEAM REACH" : off < 155 ? "BROAD REACH" : "RUNNING";
     gauges.push({ label: "WIND", unit: "kn", value: `${Math.round(off)}\u00b0${side} ${windKn.toFixed(0)}` });
-    gauges.push({ label: "POINT OF SAIL", unit: "", value: pointOfSail });
+    gauges.push({ label: "POINT OF SAIL", unit: "", value: kind === "Carrack" && off < CARRACK_CLOSEST ? "ABACK" : pointOfSail });
+    if (kind === "Carrack") {
+      const sails = carrackWind(ship);
+      gauges.push({ label: "SAILS", unit: "%", value: String(Math.round(sails.power * 100)), bar: sails.power, warn: sails.light || sails.aback });
+      // a 16th-century ship: the course by compass point (no degrees), and the whipstaff for a helm
+      gauges[1] = { label: "COMPASS", unit: "", value: COMPASS_RHUMBS[Math.round(bearing / 11.25) % 32] };
+      gauges.push({ label: "WHIPSTAFF", unit: "", value: rudderDeg === 0 ? "AMIDSHIPS" : rudderNow < 0 ? "TO PORT" : "TO STBD" });
+    }
   } else if (kind === "Hydrofoil") {
     const lift = ship.foilLift || 0;
     gauges.push({ label: "FOILS", unit: "", value: lift >= 1 ? "FOILBORNE" : lift > 0 ? `RISING ${Math.round(lift * 100)}%` : "HULLBORNE" });
@@ -7743,8 +8684,10 @@ function bridgeGauges(ship) {
     gauges.push(telegraph);
     const hose = pumpHose(ship);
     gauges.push({ label: TANKERS[kind] === "oil" ? "OIL PUMP" : "GAS PUMP", unit: "", value: hose ? "CONNECTED" : "AT SEA" });
-  } else if (kind === "Tug") {
-    gauges.push(telegraph);
+    if (kind === "WarTanker") gauges.push({ label: "DECK GUNS", unit: "", value: ship.reload > 0 ? `LOADING ${ship.reload.toFixed(1)}s` : "READY" });
+  } else if (TOWING_SHIPS.includes(kind)) {
+    if (kind === "Galley") gauges[1] = { label: "COMPASS", unit: "", value: COMPASS_RHUMBS[Math.round(bearing / 11.25) % 32] };
+    gauges.push(kind === "Tug" ? telegraph : { label: "OARS", unit: "", value: throttle > 0 ? "PULL AHEAD" : throttle < 0 ? "BACK WATER" : "AT REST" });
     gauges.push({ label: "TOW", unit: "", value: ship.tow ? (ship.towTaut ? "TAUT" : "SLACK") : `NONE (${TOW_KEY_NAMES[ship.playerSlot]})` });
   } else if (kind === "Futuristic") {
     gauges.push({ label: "THRUST", unit: "", value: `${Math.round(throttle * 100)}%`, bar: Math.abs(throttle) });
@@ -7761,10 +8704,10 @@ function bridgeGauges(ship) {
     gauges.push(telegraph);
     gauges.push(rudder);
   }
-  // Wind speed and where it comes from, with a trend of the last minute and a half, on every bridge (the sailing boats
-  // and catamarans carry it in their own wind gauge).
+  // Wind speed and where it comes from, with a trend of the last minute and a half, on every bridge (ships under
+  // sail carry it in their own wind gauge).
   const trend = game.windLog || [];
-  const windGauge = kind === "Sailing" || kind === "Catamaran" ? gauges.find((g) => g.label === "WIND") : null;
+  const windGauge = WIND_SAILED.includes(kind) ?gauges.find((g) => g.label === "WIND") : null;
   if (windGauge) windGauge.trend = trend;
   else gauges.push({ label: "WIND", unit: "kn", value: `${windKn.toFixed(0)} ${COMPASS_POINTS[Math.round(compassBearing(windFrom) / 45) % 8]}`, trend, warn: windKn > 28 });
   // Hull health, last on every bridge; red once it falls below the threshold.
@@ -7785,15 +8728,17 @@ function drawBridgeInstruments() {
   const split = view3d.split;
   const ships = split ? [game.player1, game.player2] : [soloViewShip()];
   const futuristic = (ship) => ship.category === "Futuristic";
-  const cellW = 118;
   const h = 54;
   ships.forEach((ship, i) => {
     if (!ship || ship.capsized) return;
     const gauges = bridgeGauges(ship);
+    // A long strip (the carrack's) narrows its cells to stay within that player's half
+    // (in one view: right of the status box in the top left corner).
+    const cellW = Math.min(118, Math.floor((split ? WIDTH / 2 - 8 : WIDTH - 400) / gauges.length));
     const w = cellW * gauges.length;
-    const cx = split ? (i === 0 ? WIDTH / 4 : (WIDTH * 3) / 4) : WIDTH / 2;
-    const x = cx - w / 2;
-    const y = split ? 62 : 8; // in split screen, under the top-left status bar
+    const x = split ? (i === 0 ? WIDTH / 4 : (WIDTH * 3) / 4) - w / 2 : Math.max((WIDTH - w) / 2, 386);
+    const cx = x + w / 2;
+    const y = split ? 70 : 8; // in split screen, under the top-left status bar
     const accent = futuristic(ship) ? "#7ff3ff" : "#ecf5f9";
     ctx.fillStyle = futuristic(ship) ? "rgba(18, 8, 40, 0.8)" : "rgba(14, 18, 24, 0.8)";
     ctx.fillRect(x, y, w, h);
@@ -7802,20 +8747,20 @@ function drawBridgeInstruments() {
     ctx.strokeRect(x, y, w, h);
     // the navigation-screen button: glide to the window view and back into the bridge
     const slot = ship === game.player2 ? "p2" : "p1";
-    const bw = 190;
+    const bw = 240;
     const bx = cx - bw / 2;
     const by = y + h + 6;
     ctx.fillStyle = "rgba(14, 18, 24, 0.8)";
-    ctx.fillRect(bx, by, bw, 26);
+    ctx.fillRect(bx, by, bw, 46);
     ctx.strokeStyle = "rgba(220, 235, 245, 0.35)";
-    ctx.strokeRect(bx, by, bw, 26);
+    ctx.strokeRect(bx, by, bw, 46);
     ctx.fillStyle = "#ecf5f9";
-    ctx.font = "bold 12px Segoe UI";
+    ctx.font = "bold 17px Segoe UI";
     ctx.textAlign = "center";
     const bk = keyName(game.settings.keybinds[slot + "Bridge"]);
-    ctx.fillText(bridgeFocus[slot] ? `Inside bridge (${bk})` : `Bridge camera (${bk})`, cx, by + 17);
+    ctx.fillText(bridgeFocus[slot] ? `Inside bridge (${bk})` : `Bridge camera (${bk})`, cx, by + 29);
     ctx.textAlign = "left";
-    registerUiRect(bx, by, bw, 26, () => toggleBridgeFocus(slot));
+    registerUiRect(bx, by, bw, 46, () => toggleBridgeFocus(slot));
     gauges.forEach((g, k) => {
       const gx = x + k * cellW;
       if (k > 0) {
@@ -7862,115 +8807,95 @@ function exitApp() {
   if (window.HarbourRunNative) window.HarbourRunNative.exit();
 }
 
+// The main menu's buttons: "Set Sail" in the middle (always first, so Enter
+// sets sail), then the plates along the top.
+const MENU_BAR = { y: 62, w: 186, h: 116, gap: 10 };
+const MENU_SAIL = { w: 460, h: 104, y: 462 };
+
 function getMenuButtons() {
+  const bar = [
+    { label: "Two Captains", icon: "captains", action: () => { mode = "local"; openVoyageChoice(); } },
+    { label: "Dockyard", icon: "crane", action: () => openShop("p1") },
+    { label: "Ship Crew", icon: "cap", action: () => openCrewScreen("p1") },
+    { label: "Leaderboard", icon: "trophy", action: () => { gameState = "leaderboard"; } },
+    { label: "Settings", icon: "wheel", action: () => { gameState = "settings"; } },
+    ...(IS_ANDROID_APP ? [{ label: "Exit", icon: "exit", action: exitApp }] : [])
+  ];
+  const left = (WIDTH - bar.length * (MENU_BAR.w + MENU_BAR.gap) + MENU_BAR.gap) / 2;
   return [
-    { label: "Single Player", modeTag: "single", x: 372, y: 258, w: 220, h: 46, action: () => { mode = "single"; openShipSelect(); } },
-    { label: "Local 2 Player", modeTag: "local", x: 608, y: 258, w: 220, h: 46, action: () => { mode = "local"; openShipSelect(); } },
-    { label: "Shop", x: 372, y: 318, w: 220, h: 46, action: () => openShop("p1") },
-    { label: "Settings", x: 608, y: 318, w: 220, h: 46, action: () => { gameState = "settings"; } },
-    { label: "Leaderboard", x: 372, y: 378, w: 456, h: 46, action: () => { gameState = "leaderboard"; } },
-    ...(IS_ANDROID_APP ? [{ label: "Exit", x: 372, y: 436, w: 456, h: 46, action: exitApp }] : [])
+    {
+      label: "Set Sail", sub: "Free play or mission", icon: "ship", primary: true,
+      x: (WIDTH - MENU_SAIL.w) / 2, y: MENU_SAIL.y, w: MENU_SAIL.w, h: MENU_SAIL.h,
+      action: () => { mode = "single"; openVoyageChoice(); }
+    },
+    ...bar.map((b, i) => ({ ...b, x: left + i * (MENU_BAR.w + MENU_BAR.gap), y: MENU_BAR.y, w: MENU_BAR.w, h: MENU_BAR.h }))
   ];
 }
 
-// Rows mirror the on-screen grid so Up/Down/Left/Right feel spatial rather
-// than cycling through a flat list.
-const MENU_NAV_ROWS = IS_ANDROID_APP ? [[0, 1], [2, 3], [4], [5]] : [[0, 1], [2, 3], [4]]; // the app adds an Exit row
-
-function menuGridPosition(index) {
-  for (let r = 0; r < MENU_NAV_ROWS.length; r++) {
-    const c = MENU_NAV_ROWS[r].indexOf(index);
-    if (c !== -1) return { r, c };
-  }
-  return { r: 0, c: 0 };
+function moveMenuSelection(step) {
+  game.menuIndex = clamp(game.menuIndex + step, 0, getMenuButtons().length - 1);
 }
 
-function moveMenuSelection(dr, dc) {
-  const pos = menuGridPosition(game.menuIndex);
-  if (dc !== 0) {
-    const row = MENU_NAV_ROWS[pos.r];
-    const newC = clamp(pos.c + dc, 0, row.length - 1);
-    game.menuIndex = row[newC];
-    return;
-  }
-  const newR = clamp(pos.r + dr, 0, MENU_NAV_ROWS.length - 1);
-  const row = MENU_NAV_ROWS[newR];
-  const newC = clamp(pos.c, 0, row.length - 1);
-  game.menuIndex = row[newC];
-}
-
+// The main menu over the harbour: the name and the top bar, and along the
+// bottom the ship in harbour and both captains.
 function drawMenu() {
-  // In 3D the stage CSS dims the whole view (letterbox included) instead.
-  if (!view3d.active) {
-    ctx.fillStyle = "rgba(2, 12, 18, 0.76)";
-    ctx.fillRect(0, 0, WIDTH, HEIGHT);
-  }
-
-  const glow = ctx.createLinearGradient(370, 120, 780, 120);
+  ctx.save();
+  ctx.textAlign = "center";
+  const glow = ctx.createLinearGradient(490, 0, 710, 0);
   glow.addColorStop(0, "#6ce5d9");
   glow.addColorStop(1, "#f9c15f");
+  ctx.font = "bold 40px Segoe UI";
+  ctx.lineWidth = 4;
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "rgba(0, 12, 22, 0.75)";
+  ctx.strokeText("Harbour Run", WIDTH / 2, 46);
   ctx.fillStyle = glow;
-  ctx.font = "bold 58px Segoe UI";
-  ctx.fillText("Harbour Run", 390, 166);
-  if (game.audioContext && game.audioContext.state !== "running" && soundLevel().volume > 0) {
-    ctx.save();
-    ctx.textAlign = "center";
-    ctx.font = "16px Segoe UI";
-    ctx.fillStyle = `rgba(191, 233, 255, ${0.55 + 0.35 * Math.sin(performance.now() / 400)})`;
-    ctx.fillText("Press any key or click to start the music", WIDTH / 2, HEIGHT - 28);
-    ctx.restore();
-  }
+  ctx.fillText("Harbour Run", WIDTH / 2, 46);
 
-  ctx.fillStyle = "rgba(6, 24, 36, 0.88)";
-  ctx.fillRect(340, 198, 520, 330);
-  ctx.strokeStyle = "rgba(181, 235, 255, 0.35)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(340, 198, 520, 330);
-
-  ctx.fillStyle = "#deedf6";
-  ctx.font = "20px Segoe UI";
-  ctx.fillText("Choose mode, tune settings, then launch.", 372, 236);
-
-  ctx.font = "26px Segoe UI";
-  const menuButtons = getMenuButtons();
-  for (let i = 0; i < menuButtons.length; i++) {
-    const button = menuButtons[i];
-    const selected = button.modeTag && mode === button.modeTag;
-    const focused = i === game.menuIndex;
-    ctx.fillStyle = selected ? "rgba(46, 105, 122, 0.94)" : "rgba(14, 45, 62, 0.88)";
-    ctx.fillRect(button.x, button.y, button.w, button.h);
-    ctx.strokeStyle = focused ? "rgba(255, 214, 130, 0.95)" : selected ? "rgba(200, 255, 241, 0.72)" : "rgba(235, 247, 255, 0.28)";
-    ctx.lineWidth = focused ? 3 : 2;
-    ctx.strokeRect(button.x, button.y, button.w, button.h);
-    ctx.lineWidth = 2;
-    ctx.fillStyle = "#ecf5f9";
-    ctx.fillText(button.label, button.x + 14, button.y + 31);
-    registerUiRect(button.x, button.y, button.w, button.h, () => {
-      game.menuIndex = i;
-      button.action();
+  getMenuButtons().forEach((button, i) => {
+    drawNavalButton({
+      ...button,
+      focused: i === game.menuIndex,
+      onClick: () => {
+        game.menuIndex = i;
+        button.action();
+      }
     });
-  }
-  ctx.font = "18px Segoe UI";
-  ctx.fillStyle = "#ffd182";
-  ctx.fillText("Selected Mode:", 372, 522);
-  ctx.fillStyle = mode === "single" ? "#90f0d0" : "#ffd998";
-  ctx.fillText(mode === "single" ? "Single Player vs CPU" : "Local 2 Player", 512, 522);
+  });
+  ctx.textAlign = "center";
 
-  ctx.fillStyle = "#d8e9f2";
+  ctx.fillStyle = "#f4fbff";
+  ctx.font = "bold 22px Segoe UI";
+  if (game.harbourShip) outlinedText(`${game.harbourShip.shipName} in ${HarbourA.name}`, WIDTH / 2, HEIGHT - 104);
   ctx.font = "18px Segoe UI";
-  ctx.fillText(
-    `Arrow Keys: Navigate   Enter: Select   N: Rename active player   K: Settings${devPremiumTestAllowed() ? "   P: [DEV] Premium test" : ""}`,
-    372,
-    550
-  );
-
-  ctx.fillStyle = "#9ed7ff";
-  ctx.font = "20px Segoe UI";
   const p1 = getProfile("p1");
   const p2 = getProfile("p2");
-  ctx.fillText(`P1 ${p1.name}: ${p1.points} pts | Spent ${p1.shopSpent} | Earned ${p1.shopEarned}`, 372, 582);
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#9ed7ff";
+  outlinedText(`P1 ${p1.name}: ${p1.points} pts | Spent ${p1.shopSpent} | Earned ${p1.shopEarned}`, 24, HEIGHT - 64);
+  ctx.textAlign = "right";
   ctx.fillStyle = "#ffd889";
-  ctx.fillText(`P2 ${p2.name}: ${p2.points} pts | Spent ${p2.shopSpent} | Earned ${p2.shopEarned}`, 372, 610);
+  outlinedText(`P2 ${p2.name}: ${p2.points} pts | Spent ${p2.shopSpent} | Earned ${p2.shopEarned}`, WIDTH - 24, HEIGHT - 64);
+
+  ctx.textAlign = "center";
+  ctx.font = "17px Segoe UI";
+  if (onMenuShip()) {
+    ctx.fillStyle = "#bfe6f5";
+    outlinedText(TOUCH_UI ? "Drag to turn the view, pinch to zoom" : "Drag to turn the view, mouse wheel to zoom", WIDTH / 2, HEIGHT - 84);
+  }
+  if (!TOUCH_UI) {
+    ctx.fillStyle = "#d8e9f2";
+    outlinedText(
+      `Arrows: Choose   Enter: Select   1: Set Sail   2: Two Captains   O: Dockyard   M: Ship Crew   K: Settings   N: Rename player${devPremiumTestAllowed() ? "   P: [DEV] Premium test" : ""}`,
+      WIDTH / 2,
+      HEIGHT - 36
+    );
+  }
+  if (game.audioContext?.state !== "running" && soundLevel().volume > 0) {
+    ctx.fillStyle = `rgba(191, 233, 255, ${0.55 + 0.35 * Math.sin(performance.now() / 400)})`;
+    outlinedText("Press any key or click to start the music", WIDTH / 2, HEIGHT - 10);
+  }
+  ctx.restore();
 }
 
 // The shop is a dockyard (3D scene in render3d.js): the player's ship sails
@@ -7981,8 +8906,15 @@ const DOCK_CLIP_TIME = 9; // seconds of sailing-in clip before the icons appear 
 
 function openShop(slot) {
   switchShopSlot(slot);
-  game.dock = { start: performance.now() / 1000, hideUi: false };
+  // waited / drawn / ready: render3d.js builds the dock behind a "please wait"
+  // splash and says when it is on screen.
+  game.dock = { start: performance.now() / 1000, hideUi: false, waited: 0, drawn: 0, ready: false };
   gameState = "shop";
+}
+
+// On the way to the dockyard: the 3D dock isn't on screen yet.
+function dockLoading() {
+  return view3d.active && gameState === "shop" && !game.dock.ready;
 }
 
 function dockClock() {
@@ -8025,29 +8957,255 @@ function drawDockTile(item, x, y, w, h, index, profile, alpha) {
   ctx.strokeStyle = selected ? "#ffd182" : inDock ? "#89d98b" : "rgba(166, 218, 244, 0.3)";
   ctx.lineWidth = selected ? 3 : 1.5;
   ctx.strokeRect(x, y, w, h);
-  drawCatalogIcon(item, x + w / 2, y + 21, 32, item.kind === "ship");
+  drawCatalogIcon(item, x + w / 2, y + 23, 34, item.kind === "ship");
   ctx.textAlign = "center";
-  ctx.font = "11px Segoe UI";
+  ctx.font = "13px Segoe UI";
   ctx.fillStyle = "#f4fbff";
-  ctx.fillText(fitText(item.name, w - 6), x + w / 2, y + h - 18);
-  ctx.font = "bold 11px Segoe UI";
+  // the name on two lines, so it can be read whole
+  const words = item.name.split(" ");
+  const lines = [words[0], words.slice(1).join(" ")];
+  lines.forEach((line, i) => ctx.fillText(line, x + w / 2, y + 52 + i * 14, w - 4));
+  ctx.font = "bold 14px Segoe UI";
   const blocked = item.premiumPack && !game.entitlements[item.premiumPack];
   ctx.fillStyle = owned ? "#89d98b" : blocked ? "#d0a1a1" : "#ffd182";
-  ctx.fillText(inDock ? "In dock" : owned ? (item.kind === "ship" ? "Owned" : "Fitted") : item.premiumPack ? "premium" : `${item.cost}`, x + w / 2, y + h - 5);
+  ctx.fillText(inDock ? "In dock" : owned ? (item.kind === "ship" ? "Owned" : "Fitted") : item.premiumPack ? "premium" : `${item.cost}`, x + w / 2, y + h - 7);
   ctx.restore();
   registerUiRect(x, y, w, h, () => { game.shopIndex = index; });
 }
 
-function drawDockButton(label, x, y, w, h, fill, edge, text, onClick) {
+// A button plate: rounded, with a sheen, a rim and an inner line like inlaid
+// brass. A focused plate gets a bright gold rim and a glow.
+function drawPlate(x, y, w, h, fill, edge, focused = false) {
+  const radius = Math.min(12, h / 4);
+  ctx.save();
+  ctx.shadowColor = focused ? "rgba(255, 200, 90, 0.85)" : "rgba(0, 8, 16, 0.6)";
+  ctx.shadowBlur = focused ? 18 : 8;
+  ctx.shadowOffsetY = focused ? 0 : 3;
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, radius);
   ctx.fillStyle = fill;
-  ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = edge;
+  ctx.fill();
+  ctx.shadowColor = "transparent";
+  const sheen = ctx.createLinearGradient(0, y, 0, y + h);
+  sheen.addColorStop(0, "rgba(255, 255, 255, 0.2)");
+  sheen.addColorStop(0.45, "rgba(255, 255, 255, 0.04)");
+  sheen.addColorStop(1, "rgba(0, 0, 0, 0.3)");
+  ctx.fillStyle = sheen;
+  ctx.fill();
+  ctx.strokeStyle = focused ? "#ffd682" : edge;
+  ctx.lineWidth = focused ? 3 : 1.5;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.roundRect(x + 4, y + 4, w - 8, h - 8, radius - 3);
+  ctx.strokeStyle = "rgba(255, 224, 160, 0.28)";
   ctx.lineWidth = 1;
-  ctx.strokeRect(x, y, w, h);
-  ctx.fillStyle = text;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// The buttons' nautical pictures, drawn in a 100 x 100 box centred on (0, 0).
+const BUTTON_ICONS = {
+  // a ship under sail
+  ship(c) {
+    c.fillRect(-3, -44, 5, 66);
+    iconShape(c, [[7, -40], [38, 10], [7, 10]]);
+    iconShape(c, [[-8, -30], [-34, 10], [-8, 10]]);
+    iconShape(c, [[2, -46], [22, -40], [2, -34]]);
+    iconShape(c, [[-44, 17], [44, 17], [28, 34], [-30, 34]]);
+    iconWave(c, 43);
+  },
+  // two captains
+  captains(c) {
+    for (const [x, y, s] of [[20, -8, 0.82], [-16, 8, 1]]) {
+      c.save();
+      c.translate(x, y);
+      c.scale(s, s);
+      c.beginPath();
+      c.arc(0, -6, 14, 0, Math.PI * 2);
+      c.fill();
+      c.beginPath();
+      c.ellipse(0, 38, 28, 24, 0, Math.PI, Math.PI * 2);
+      c.fill();
+      iconShape(c, [[-20, -24], [-16, -38], [16, -38], [20, -24]]);
+      c.fillRect(-17, -22, 34, 5);
+      c.restore();
+    }
+  },
+  // the dockyard's gantry crane, lifting a crate
+  crane(c) {
+    c.fillRect(-42, -38, 84, 10);
+    iconShape(c, [[-34, -30], [-24, -30], [-30, 40], [-42, 40]]);
+    iconShape(c, [[24, -30], [34, -30], [42, 40], [30, 40]]);
+    c.fillRect(-2, -28, 4, 30);
+    c.fillRect(-15, 2, 30, 24);
+    c.fillRect(-46, 40, 92, 6);
+  },
+  // a captain's peaked cap
+  cap(c) {
+    c.beginPath();
+    c.moveTo(-44, -12);
+    c.quadraticCurveTo(0, -52, 44, -12);
+    c.lineTo(30, 8);
+    c.lineTo(-30, 8);
+    c.closePath();
+    c.fill();
+    c.fillRect(-30, 12, 60, 12);
+    c.beginPath();
+    c.moveTo(-34, 28);
+    c.quadraticCurveTo(0, 54, 34, 28);
+    c.closePath();
+    c.fill();
+    c.save();
+    c.fillStyle = "#14354a";
+    c.beginPath();
+    c.arc(0, -10, 8, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+  },
+  trophy(c) {
+    c.beginPath();
+    c.moveTo(-26, -40);
+    c.lineTo(26, -40);
+    c.quadraticCurveTo(24, 6, 0, 10);
+    c.quadraticCurveTo(-24, 6, -26, -40);
+    c.fill();
+    for (const side of [-1, 1]) {
+      c.beginPath();
+      c.arc(side * 27, -24, 13, 0, Math.PI * 2);
+      c.stroke();
+    }
+    c.fillRect(-5, 8, 10, 20);
+    iconShape(c, [[-16, 26], [16, 26], [22, 42], [-22, 42]]);
+  },
+  // a ship's steering wheel
+  wheel(c) {
+    c.beginPath();
+    c.arc(0, 0, 28, 0, Math.PI * 2);
+    c.stroke();
+    for (let i = 0; i < 8; i += 1) {
+      const a = (i * Math.PI) / 4;
+      c.beginPath();
+      c.moveTo(0, 0);
+      c.lineTo(Math.cos(a) * 42, Math.sin(a) * 42);
+      c.stroke();
+      c.beginPath();
+      c.arc(Math.cos(a) * 43, Math.sin(a) * 43, 6, 0, Math.PI * 2);
+      c.fill();
+    }
+    c.beginPath();
+    c.arc(0, 0, 10, 0, Math.PI * 2);
+    c.fill();
+  },
+  // a lifebuoy: back to the harbour
+  buoy(c) {
+    c.save();
+    c.lineWidth = 18;
+    c.beginPath();
+    c.arc(0, 0, 30, 0, Math.PI * 2);
+    c.stroke();
+    c.strokeStyle = "#c4473a";
+    for (let i = 0; i < 4; i += 1) {
+      c.beginPath();
+      c.arc(0, 0, 30, (i * Math.PI) / 2 + 0.5, (i * Math.PI) / 2 + 1.07);
+      c.stroke();
+    }
+    c.restore();
+  },
+  exit(c) {
+    c.strokeRect(-34, -40, 40, 80);
+    c.fillRect(-10, -5, 34, 10);
+    iconShape(c, [[20, -20], [44, 0], [20, 20]]);
+  },
+  back(c) {
+    iconShape(c, [[-44, 0], [-8, -32], [-8, 32]]);
+    c.fillRect(-12, -11, 54, 22);
+  }
+};
+
+function iconShape(c, points) {
+  c.beginPath();
+  points.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y)));
+  c.closePath();
+  c.fill();
+}
+
+function iconWave(c, y) {
+  c.beginPath();
+  c.moveTo(-46, y);
+  for (let x = -46; x < 46; x += 23) c.quadraticCurveTo(x + 11.5, y + 9, x + 23, y);
+  c.stroke();
+}
+
+function drawButtonIcon(name, cx, cy, size, color) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(size / 100, size / 100);
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 7;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  BUTTON_ICONS[name](ctx);
+  ctx.restore();
+}
+
+// A big menu button: the picture over the name, or (primary) the brass "go"
+// button with its picture in a medallion beside the name.
+function drawNavalButton({ x, y, w, h, label, sub, icon, primary, focused, onClick }) {
+  ctx.save();
   ctx.textAlign = "center";
-  ctx.fillText(label, x + w / 2, y + h / 2 + 6);
+  if (primary) {
+    const brass = ctx.createLinearGradient(0, y, 0, y + h);
+    brass.addColorStop(0, "#ffe09a");
+    brass.addColorStop(0.55, "#e6a93f");
+    brass.addColorStop(1, "#a86a22");
+    drawPlate(x, y, w, h, brass, "#6e4413", focused);
+    const r = h / 2 - 10;
+    const cx = x + r + 16;
+    ctx.beginPath();
+    ctx.arc(cx, y + h / 2, r, 0, Math.PI * 2);
+    ctx.fillStyle = "#0d3047";
+    ctx.fill();
+    ctx.strokeStyle = "#fff0c4";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    drawButtonIcon(icon, cx, y + h / 2, r * 1.5, "#ffe7ae");
+    const middle = (cx + r + x + w) / 2;
+    const room = x + w - cx - r - 24;
+    const size = Math.round(Math.min(40, h * 0.38));
+    ctx.fillStyle = "#102534";
+    ctx.font = `bold ${size}px Segoe UI`;
+    ctx.fillText(label.toUpperCase(), middle, y + (sub ? h / 2 + 4 : h / 2 + size * 0.36), room);
+    if (sub) {
+      ctx.font = "bold 19px Segoe UI";
+      ctx.fillText(sub, middle, y + h / 2 + 32, room);
+    }
+  } else {
+    drawPlate(x, y, w, h, focused ? "rgba(38, 98, 120, 0.95)" : "rgba(9, 35, 52, 0.86)", "rgba(214, 170, 92, 0.75)", focused);
+    drawButtonIcon(icon, x + w / 2, y + h / 2 - 16, 56, focused ? "#ffe7ae" : "#e8c274");
+    ctx.fillStyle = "#f2f8fb";
+    ctx.font = "bold 22px Segoe UI";
+    ctx.fillText(label, x + w / 2, y + h - 16, w - 10);
+  }
+  ctx.restore();
+  registerUiRect(x, y, w, h, onClick);
+}
+
+// A button on the other screens: its text sized to its height; `icon` is optional.
+function drawDockButton(label, x, y, w, h, fill, edge, text, onClick, icon) {
+  drawPlate(x, y, w, h, fill, edge);
+  ctx.save();
   ctx.textAlign = "left";
+  const font = clamp(Math.round(h * 0.38), 17, 28);
+  ctx.font = `bold ${font}px Segoe UI`;
+  const size = icon ? Math.min(40, Math.round(h * 0.55)) : 0;
+  const gap = icon ? 10 : 0;
+  const textW = Math.min(ctx.measureText(label).width, w - size - gap - 18);
+  const left = x + (w - size - gap - textW) / 2;
+  if (icon) drawButtonIcon(icon, left + size / 2, y + h / 2, size, text);
+  ctx.fillStyle = text;
+  ctx.fillText(label, left + size + gap, y + h / 2 + font * 0.35, textW);
+  ctx.restore();
   registerUiRect(x, y, w, h, onClick);
 }
 
@@ -8086,11 +9244,15 @@ function drawShopScreen() {
   }
   ctx.textAlign = "left";
   ctx.fillStyle = "#f4fbff";
-  ctx.font = "30px Segoe UI";
-  outlinedText("Harbour Dockyard", 30, 42);
+  ctx.font = "bold 32px Segoe UI";
+  const titleX = TOUCH_UI ? 150 : 30; // clear of the touch Back button
+  outlinedText(game.dock.arsenal ? "The Order's Arsenal" : "Harbour Dockyard", titleX, 42);
   ctx.font = "17px Segoe UI";
   ctx.fillStyle = "#cfe6f2";
-  outlinedText(t < DOCK_CLIP_TIME ? `${shipName} is sailing to the dockyard...` : `${shipName} in the dry dock`, 32, 68);
+  const careened = getShipDefinition(profile.selectedShip).category === "Carrack"; // not dry-docked (render3d.js)
+  outlinedText(
+    t < DOCK_CLIP_TIME ? `${shipName} is sailing to the ${careened ? "arsenal" : "dockyard"}...` : `${shipName} ${careened ? "careened at the arsenal quay" : "in the dry dock"}`,
+    titleX + 2, 70);
   ctx.textAlign = "right";
   ctx.font = "18px Segoe UI";
   ctx.fillStyle = game.shopSlot === "p1" ? "#bfe8ff" : "#ffe3c0";
@@ -8111,15 +9273,15 @@ function drawShopScreen() {
     return;
   }
 
-  ctx.font = "15px Segoe UI";
+  const panelButton = (label, hide) => drawDockButton(label, WIDTH - 250, 56, 234, 60, "rgba(14, 40, 58, 0.9)", "rgba(166, 218, 244, 0.5)", "#e8f6ff", () => { game.dock.hideUi = hide; });
   if (game.dock.hideUi) {
-    drawDockButton("Show panel (V)", WIDTH - 170, 56, 140, 30, "rgba(14, 40, 58, 0.85)", "rgba(166, 218, 244, 0.5)", "#e8f6ff", () => { game.dock.hideUi = false; });
+    panelButton(`Show panel${TOUCH_UI ? "" : " (V)"}`, false);
     return;
   }
-  drawDockButton("Hide panel (V)", WIDTH - 170, 56, 140, 30, "rgba(14, 40, 58, 0.85)", "rgba(166, 218, 244, 0.5)", "#e8f6ff", () => { game.dock.hideUi = true; });
+  panelButton(`Hide panel${TOUCH_UI ? "" : " (V)"}`, true);
 
   // icon panel along the bottom
-  const y0 = 398;
+  const y0 = 350;
   const panel = ctx.createLinearGradient(0, y0, 0, HEIGHT);
   panel.addColorStop(0, "rgba(4, 12, 20, 0.62)");
   panel.addColorStop(0.2, "rgba(4, 12, 20, 0.86)");
@@ -8133,44 +9295,46 @@ function drawShopScreen() {
   ctx.lineTo(WIDTH, y0);
   ctx.stroke();
   const gadgetCount = entries.filter((e) => e.kind === "gadget").length;
+  const shipCount = entries.length - gadgetCount;
+  const gadgetW = Math.min(96, Math.floor((WIDTH - 24) / gadgetCount) - 4);
+  const gadgetX = Math.round((WIDTH - gadgetCount * (gadgetW + 4) + 4) / 2);
+  const shipW = Math.min(96, Math.floor((WIDTH - 24) / shipCount) - 4); // the whole fleet in one row
+  const shipX = Math.round((WIDTH - shipCount * (shipW + 4) + 4) / 2);
   ctx.save();
   ctx.globalAlpha = iconAlpha;
   ctx.fillStyle = "#9ed7ff";
-  ctx.font = "15px Segoe UI";
-  ctx.fillText("Upgrades", 124, y0 + 22);
-  ctx.fillText("Ships", 124, y0 + 112);
+  ctx.font = "bold 17px Segoe UI";
+  ctx.fillText("Upgrades", gadgetX, y0 + 22);
+  ctx.fillText("Ships", shipX, y0 + 138);
   ctx.restore();
   entries.forEach((item, i) => {
     const shipRow = item.kind === "ship";
     const col = shipRow ? i - gadgetCount : i;
-    const w = shipRow ? 72 : 88;
-    drawDockTile(item, 124 + col * (w + 8), y0 + (shipRow ? 120 : 30), w, 62, i, profile, iconAlpha);
+    const w = shipRow ? shipW : gadgetW;
+    drawDockTile(item, (shipRow ? shipX : gadgetX) + col * (w + 4), y0 + (shipRow ? 146 : 30), w, 90, i, profile, iconAlpha);
   });
 
   const selected = entries[game.shopIndex];
   const selectedOwned = selected.kind === "ship" ? isShipOwned(profile, selected) : !!profile.owned[selected.id];
-  const barY = y0 + 196;
+  const barY = y0 + 244;
   ctx.fillStyle = "rgba(12, 39, 55, 0.92)";
-  ctx.fillRect(124, barY, 952, 54);
+  ctx.fillRect(12, barY, WIDTH - 24, 82);
   ctx.strokeStyle = "rgba(166, 218, 244, 0.35)";
   ctx.lineWidth = 1;
-  ctx.strokeRect(124, barY, 952, 54);
+  ctx.strokeRect(12, barY, WIDTH - 24, 82);
   ctx.fillStyle = "#e8f6ff";
-  ctx.font = "17px Segoe UI";
-  ctx.fillText(`${selected.name}  |  ${selectedOwned ? "Owned" : "Not owned"}  |  Price: ${selected.premiumPack ? "Premium" : selected.cost}`, 136, barY + 22);
+  ctx.font = "bold 20px Segoe UI";
+  ctx.fillText(`${selected.name}  |  ${selectedOwned ? "Owned" : "Not owned"}  |  Price: ${selected.premiumPack ? "Premium" : selected.cost}`, 28, barY + 30, 770);
   ctx.fillStyle = "#c9dfea";
-  ctx.font = "14px Segoe UI";
-  ctx.fillText(fitText(selected.desc || "", 640), 136, barY + 43);
   ctx.font = "17px Segoe UI";
-  drawDockButton(selected.kind === "ship" && selectedOwned ? "Equip" : selected.premiumPack ? "Buy pack" : "Buy", 812, barY + 5, 112, 44, "rgba(27, 98, 72, 0.92)", "rgba(196, 255, 224, 0.45)", "#e7fff4", () => buySelectedItem());
-  drawDockButton("Sell", 938, barY + 5, 126, 44, "rgba(91, 73, 31, 0.92)", "rgba(255, 229, 177, 0.45)", "#fff3de", () => sellSelectedItem());
+  ctx.fillText(game.uiMessage || fitText(selected.desc || "", 760), 28, barY + 60, 770);
+  drawDockButton(selected.kind === "ship" && selectedOwned ? "Equip" : selected.premiumPack ? "Buy pack" : "Buy", 820, barY + 6, 174, 70, "rgba(27, 98, 72, 0.92)", "rgba(196, 255, 224, 0.45)", "#e7fff4", () => buySelectedItem());
+  drawDockButton("Sell", 1004, barY + 6, 174, 70, "rgba(91, 73, 31, 0.92)", "rgba(255, 229, 177, 0.45)", "#fff3de", () => sellSelectedItem());
 
-  ctx.fillStyle = "#ffd182";
-  ctx.font = "15px Segoe UI";
-  ctx.fillText("Arrows: Select  Enter: Buy / Equip  Backspace: Sell  Tab: Switch Player  V: Hide panel  N: Rename  Esc: Back", 124, HEIGHT - 28);
-  if (game.uiMessage) {
-    ctx.fillStyle = "#d8f2ff";
-    ctx.fillText(game.uiMessage, 124, HEIGHT - 8);
+  if (!TOUCH_UI) {
+    ctx.fillStyle = "#ffd182";
+    ctx.font = "15px Segoe UI";
+    ctx.fillText("Arrows: Select  Enter: Buy / Equip  Backspace: Sell  Tab: Switch Player  V: Hide panel  N: Rename  Esc: Back", 28, HEIGHT - 7);
   }
 }
 
@@ -8178,10 +9342,10 @@ function drawPremiumScreen() {
   const pack = game.premiumPackId;
   const info = PREMIUM_PACKS[pack];
   const owned = game.entitlements[pack];
-  const panelX = 230;
-  const panelY = 90;
-  const panelW = WIDTH - 460;
-  const panelH = HEIGHT - 180;
+  const panelX = 160;
+  const panelY = 70;
+  const panelW = WIDTH - 320;
+  const panelH = HEIGHT - 140;
 
   ctx.fillStyle = "rgba(2, 12, 18, 0.7)";
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
@@ -8207,10 +9371,10 @@ function drawPremiumScreen() {
   ];
   ctx.font = "16px Segoe UI";
   ctx.fillStyle = "#efe8ff";
-  contents.forEach((line, i) => ctx.fillText(`- ${line}`, panelX + 44, panelY + 146 + i * 26));
+  contents.forEach((line, i) => ctx.fillText(`- ${line}`, panelX + 44, panelY + 146 + i * 26, panelW - 64));
   if (contents.some((line) => line.startsWith("Gadget"))) {
     ctx.fillStyle = "#a99bc8";
-    ctx.fillText("Gadgets in the pack are then bought with points in the Shop.", panelX + 44, panelY + 152 + contents.length * 26);
+    ctx.fillText("Gadgets in the pack are then bought with points in the Dockyard.", panelX + 44, panelY + 152 + contents.length * 26);
   }
 
   let status;
@@ -8222,11 +9386,11 @@ function drawPremiumScreen() {
   else status = "Purchases are available in the Microsoft Store version of Harbour Run.";
   ctx.font = "18px Segoe UI";
   ctx.fillStyle = owned ? "#89d98b" : "#ffd182";
-  ctx.fillText(status, panelX + 30, panelY + panelH - 126);
+  ctx.fillText(status, panelX + 30, panelY + panelH - 160);
   if (!owned) {
     ctx.font = "15px Segoe UI";
     ctx.fillStyle = "#c9b9ee";
-    ctx.fillText("Not owned yet: purchase this pack to equip its ships. Premium items can't be earned with points.", panelX + 30, panelY + panelH - 100);
+    ctx.fillText("Not owned yet: purchase this pack to equip its ships. Premium items can't be earned with points.", panelX + 30, panelY + panelH - 134);
     ctx.font = "18px Segoe UI";
   }
 
@@ -8244,16 +9408,8 @@ function drawPremiumScreen() {
     });
   }
   buttons.forEach((b, i) => {
-    const x = panelX + 30 + i * 230;
-    const y = panelY + panelH - 96;
-    ctx.fillStyle = b.enabled ? b.color : "rgba(67, 74, 82, 0.7)";
-    ctx.fillRect(x, y, 210, 44);
-    ctx.strokeStyle = "rgba(235, 225, 255, 0.4)";
-    ctx.strokeRect(x, y, 210, 44);
-    ctx.fillStyle = "#f8f4ff";
-    ctx.font = "18px Segoe UI";
-    ctx.fillText(b.label, x + 16, y + 28);
-    if (b.enabled) registerUiRect(x, y, 210, 44, b.action);
+    drawDockButton(b.label, panelX + 30 + i * 280, panelY + panelH - 118, 262, 78,
+      b.enabled ? b.color : "rgba(67, 74, 82, 0.7)", "rgba(235, 225, 255, 0.4)", "#f8f4ff", b.enabled ? b.action : () => {});
   });
 
   if (game.uiMessage) {
@@ -8263,11 +9419,21 @@ function drawPremiumScreen() {
   }
 }
 
+// The next gameplay preset, with the wind and hazard strengths that go with it.
+function cyclePreset() {
+  const idx = GAMEPLAY_PRESETS.indexOf(game.settings.gameplayPreset);
+  game.settings.gameplayPreset = GAMEPLAY_PRESETS[(idx + 1) % GAMEPLAY_PRESETS.length];
+  const scale = { calm: 0.75, chaos: 1.25 }[game.settings.gameplayPreset] || 1;
+  game.settings.windScale = scale;
+  game.settings.hazardScale = scale;
+  saveSettings();
+}
+
 function drawSettingsScreen() {
-  const panelX = 110;
-  const panelY = 52;
-  const panelW = WIDTH - 220;
-  const panelH = HEIGHT - 104;
+  const panelX = 30;
+  const panelY = 14;
+  const panelW = WIDTH - 60;
+  const panelH = HEIGHT - 28;
 
   ctx.fillStyle = "rgba(7, 19, 31, 0.93)";
   ctx.fillRect(panelX, panelY, panelW, panelH);
@@ -8276,143 +9442,75 @@ function drawSettingsScreen() {
   ctx.strokeRect(panelX, panelY, panelW, panelH);
 
   ctx.fillStyle = "#e9f8ff";
-  ctx.font = "34px Segoe UI";
-  ctx.fillText("Settings", panelX + 28, panelY + 46);
-
-  ctx.font = "16px Segoe UI";
+  ctx.font = "bold 36px Segoe UI";
+  ctx.fillText("Settings", panelX + (TOUCH_UI ? 150 : 28), panelY + 46);
+  ctx.font = "18px Segoe UI";
   ctx.fillStyle = "#8fb4c8";
   ctx.textAlign = "right";
-  ctx.fillText(`Version ${GAME_VERSION}`, panelX + panelW - 24, panelY + 40);
+  ctx.fillText(`Version ${GAME_VERSION}`, panelX + panelW - 24, panelY + 42);
   ctx.textAlign = "left";
 
-  ctx.font = "20px Segoe UI";
-  ctx.fillStyle = "#bde8ff";
-  ctx.fillText(`Gameplay Preset: ${game.settings.gameplayPreset.toUpperCase()}`, panelX + 28, panelY + 90);
-  ctx.fillText(`Wind Strength: ${Math.round(game.settings.windScale * 100)}%`, panelX + 28, panelY + 120);
-  ctx.fillText(`Hazard Strength: ${Math.round(game.settings.hazardScale * 100)}%`, panelX + 28, panelY + 150);
-  ctx.fillText(
-    view3d.active
-      ? `Camera View: ${CAMERA_VIEW_NAMES[game.settings.cameraView].toUpperCase()}`
-      : "Camera View: 3D graphics only",
-    panelX + 28,
-    panelY + 180
-  );
-
-  const cameraRect = { x: panelX + 390, y: panelY + 158, w: 210, h: 30 };
-  ctx.fillStyle = "rgba(24, 73, 97, 0.9)";
-  ctx.fillRect(cameraRect.x, cameraRect.y, cameraRect.w, cameraRect.h);
-  ctx.strokeStyle = "rgba(187, 230, 252, 0.45)";
-  ctx.strokeRect(cameraRect.x, cameraRect.y, cameraRect.w, cameraRect.h);
-  ctx.fillStyle = "#f3fbff";
-  ctx.font = "16px Segoe UI";
-  ctx.fillText(`Switch Camera (${keyName(game.settings.keybinds.cameraView)})`, cameraRect.x + 38, cameraRect.y + 20);
-  ctx.font = "20px Segoe UI";
-  registerUiRect(cameraRect.x, cameraRect.y, cameraRect.w, cameraRect.h, toggleCameraView);
-
-  ctx.fillStyle = "#bde8ff";
-  ctx.fillText(`Graphics: ${graphicsModeLabel()}`, panelX + 28, panelY + 216);
-  ctx.font = "14px Segoe UI";
-  ctx.fillStyle = "#8fb4c8";
-  if (view3d.available) {
-    ctx.fillText(`Graphics card in use: ${view3d.gpu}${view3d.advancedCapable ? " (Advanced available)" : ""}`, panelX + 28, panelY + 234);
-    if (!view3d.advancedCapable) {
-      ctx.fillText("Advanced needs a dedicated card: Windows Settings > System > Display > Graphics > Chrome > High performance", panelX + 28, panelY + 251);
-    }
-  }
-  const graphicsRect = { x: panelX + 620, y: panelY + 196, w: 210, h: 30 };
-  ctx.fillStyle = "rgba(24, 73, 97, 0.9)";
-  ctx.fillRect(graphicsRect.x, graphicsRect.y, graphicsRect.w, graphicsRect.h);
-  ctx.strokeStyle = "rgba(187, 230, 252, 0.45)";
-  ctx.strokeRect(graphicsRect.x, graphicsRect.y, graphicsRect.w, graphicsRect.h);
-  ctx.fillStyle = "#f3fbff";
-  ctx.font = "16px Segoe UI";
-  ctx.fillText("Change Graphics (G)", graphicsRect.x + 34, graphicsRect.y + 20);
-  ctx.font = "20px Segoe UI";
-  registerUiRect(graphicsRect.x, graphicsRect.y, graphicsRect.w, graphicsRect.h, cycleGraphicsMode);
-
-  const nightRect = { x: panelX + 620, y: panelY + 146, w: 210, h: 30 };
-  ctx.fillStyle = "rgba(24, 73, 97, 0.9)";
-  ctx.fillRect(nightRect.x, nightRect.y, nightRect.w, nightRect.h);
-  ctx.strokeStyle = "rgba(187, 230, 252, 0.45)";
-  ctx.strokeRect(nightRect.x, nightRect.y, nightRect.w, nightRect.h);
-  ctx.fillStyle = "#f3fbff";
-  ctx.font = "16px Segoe UI";
-  ctx.fillText(`Time: ${game.settings.nightMode ? "Night" : "Day"} (${keyName(game.settings.keybinds.nightMode)} to switch)`, nightRect.x + 22, nightRect.y + 20);
-  ctx.font = "20px Segoe UI";
-  registerUiRect(nightRect.x, nightRect.y, nightRect.w, nightRect.h, toggleNightMode);
-
-  ctx.fillStyle = "#bde8ff";
-  ctx.fillText(`Sound: ${soundLevel().name}`, panelX + 620, panelY + 90);
-  const soundRect = { x: panelX + 620, y: panelY + 104, w: 210, h: 30 };
-  ctx.fillStyle = "rgba(24, 73, 97, 0.9)";
-  ctx.fillRect(soundRect.x, soundRect.y, soundRect.w, soundRect.h);
-  ctx.strokeStyle = "rgba(187, 230, 252, 0.45)";
-  ctx.strokeRect(soundRect.x, soundRect.y, soundRect.w, soundRect.h);
-  ctx.fillStyle = "#f3fbff";
-  ctx.font = "16px Segoe UI";
-  ctx.fillText("Change Sound (V)", soundRect.x + 42, soundRect.y + 20);
-  ctx.font = "20px Segoe UI";
-  registerUiRect(soundRect.x, soundRect.y, soundRect.w, soundRect.h, cycleSoundLevel);
-
-  const presetRect = { x: panelX + 390, y: panelY + 66, w: 210, h: 34 };
-  ctx.fillStyle = "rgba(24, 73, 97, 0.9)";
-  ctx.fillRect(presetRect.x, presetRect.y, presetRect.w, presetRect.h);
-  ctx.strokeStyle = "rgba(187, 230, 252, 0.45)";
-  ctx.strokeRect(presetRect.x, presetRect.y, presetRect.w, presetRect.h);
-  ctx.fillStyle = "#f3fbff";
-  ctx.font = "18px Segoe UI";
-  ctx.fillText("Cycle Preset", presetRect.x + 52, presetRect.y + 23);
-  registerUiRect(presetRect.x, presetRect.y, presetRect.w, presetRect.h, () => {
-    const idx = GAMEPLAY_PRESETS.indexOf(game.settings.gameplayPreset);
-    game.settings.gameplayPreset = GAMEPLAY_PRESETS[(idx + 1) % GAMEPLAY_PRESETS.length];
-    if (game.settings.gameplayPreset === "calm") {
-      game.settings.windScale = 0.75;
-      game.settings.hazardScale = 0.75;
-    } else if (game.settings.gameplayPreset === "chaos") {
-      game.settings.windScale = 1.25;
-      game.settings.hazardScale = 1.25;
-    } else {
-      game.settings.windScale = 1;
-      game.settings.hazardScale = 1;
-    }
-    saveSettings();
+  // Touch screens have no keys to rebind: the settings get the whole screen.
+  const rowH = TOUCH_UI ? 120 : 60;
+  const step = rowH + (TOUCH_UI ? 24 : 10);
+  const key = (text) => (TOUCH_UI ? "" : ` (${text})`);
+  const camera = view3d.active ? `${CAMERA_VIEW_NAMES[game.settings.cameraView]}${key(keyName(game.settings.keybinds.cameraView))}` : "3D graphics only";
+  const buttons = [
+    [`Preset: ${game.settings.gameplayPreset.toUpperCase()}  (wind and hazards ${Math.round(game.settings.windScale * 100)}%)`, cyclePreset],
+    [`Camera: ${camera}`, toggleCameraView],
+    [`Graphics: ${graphicsModeLabel()}${key("G")}`, cycleGraphicsMode],
+    [`Time: ${game.settings.nightMode ? "Night" : "Day"}${key(keyName(game.settings.keybinds.nightMode))}`, toggleNightMode],
+    [`Sound: ${soundLevel().name}${key("V")}`, cycleSoundLevel],
+    [`Back${key("Esc")}`, () => { game.keyRebindAction = null; gameState = "menu"; }]
+  ];
+  buttons.forEach(([label, action], i) => {
+    const x = panelX + 24 + (i % 2) * (panelW / 2 - 12);
+    const y = panelY + (TOUCH_UI ? 90 : 62) + Math.floor(i / 2) * step;
+    drawDockButton(label, x, y, panelW / 2 - 36, rowH, "rgba(24, 73, 97, 0.95)", "rgba(187, 230, 252, 0.5)", "#f3fbff", action);
   });
 
-  const keyEntries = Object.entries(KEYBIND_LABELS);
-  ctx.font = "14px Segoe UI";
-  const colW = Math.floor((panelW - 56) / 4);
-  for (let i = 0; i < keyEntries.length; i += 1) {
-    const [action, label] = keyEntries[i];
-    const col = Math.floor(i / 7);
-    const row = i % 7;
-    const x = panelX + 28 + col * colW;
-    const y = panelY + 262 + row * 40;
-    const isWaiting = game.keyRebindAction === action;
+  ctx.font = "15px Segoe UI";
+  ctx.fillStyle = "#8fb4c8";
+  const cardY = panelY + (TOUCH_UI ? 90 + 3 * step + 8 : 62 + 3 * step + 12);
+  if (view3d.available) {
+    const note = view3d.advancedCapable ? " (Advanced available)" : TOUCH_UI ? "" : ". Advanced needs a dedicated card (Windows Settings > Display > Graphics > High performance)";
+    ctx.fillText(`Graphics card in use: ${view3d.gpu}${note}`, panelX + 24, cardY, panelW - 48);
+  }
 
-    ctx.fillStyle = "rgba(10, 38, 55, 0.9)";
-    ctx.fillRect(x, y, colW - 8, 34);
-    ctx.strokeStyle = isWaiting ? "#ffd182" : "rgba(163, 216, 240, 0.35)";
-    ctx.strokeRect(x, y, colW - 8, 34);
+  if (!TOUCH_UI) {
+    const keyEntries = Object.entries(KEYBIND_LABELS);
+    const colW = Math.floor((panelW - 40) / 4);
+    for (let i = 0; i < keyEntries.length; i += 1) {
+      const [action, label] = keyEntries[i];
+      const col = Math.floor(i / 7);
+      const row = i % 7;
+      const x = panelX + 24 + col * colW;
+      const y = cardY + 12 + row * 49;
+      const isWaiting = game.keyRebindAction === action;
 
-    ctx.fillStyle = "#e6f5fb";
-    ctx.fillText(label, x + 10, y + 14);
-    ctx.fillStyle = isWaiting ? "#ffd182" : "#8cead9";
-    ctx.fillText(isWaiting ? "Press a key..." : keyName(game.settings.keybinds[action]), x + 10, y + 28);
+      ctx.fillStyle = "rgba(10, 38, 55, 0.9)";
+      ctx.fillRect(x, y, colW - 8, 45);
+      ctx.strokeStyle = isWaiting ? "#ffd182" : "rgba(163, 216, 240, 0.35)";
+      ctx.lineWidth = isWaiting ? 3 : 1.5;
+      ctx.strokeRect(x, y, colW - 8, 45);
 
-    registerUiRect(x, y, colW - 8, 34, () => {
-      game.keyRebindAction = action;
-      setUiMessage(`Rebinding ${label}. Press a key.`);
-    });
+      ctx.fillStyle = "#e6f5fb";
+      ctx.font = "16px Segoe UI";
+      ctx.fillText(label, x + 10, y + 18);
+      ctx.fillStyle = isWaiting ? "#ffd182" : "#8cead9";
+      ctx.font = "bold 18px Segoe UI";
+      ctx.fillText(isWaiting ? "Press a key..." : keyName(game.settings.keybinds[action]), x + 10, y + 39);
+
+      registerUiRect(x, y, colW - 8, 45, () => {
+        game.keyRebindAction = action;
+        setUiMessage(`Rebinding ${label}. Press a key.`);
+      });
+    }
   }
 
   ctx.fillStyle = "#ffd182";
-  ctx.font = "16px Segoe UI";
-  ctx.fillText("Click any key binding box, then press a key. Esc: back to menu", panelX + 28, panelY + panelH - 22);
-  if (game.uiMessage) {
-    ctx.fillStyle = "#d8f2ff";
-    ctx.font = "14px Segoe UI";
-    ctx.fillText(game.uiMessage, panelX + 28, panelY + panelH - 44);
-  }
+  ctx.font = "17px Segoe UI";
+  ctx.fillText(game.uiMessage || (TOUCH_UI ? "Tap a setting to change it" : "Click a key box, then press a key"), panelX + 24, panelY + panelH - 12);
 }
 
 // "GasTanker" -> "Gas Tanker".
@@ -8425,10 +9523,11 @@ function drawShipSelectionScreen() {
   const profile = getProfile(slot);
   const shipDef = getShipDefinition(game.shipSelections[slot]);
   const owned = isShipOwned(profile, shipDef);
-  const panelX = 88;
-  const panelY = 64;
-  const panelW = WIDTH - 176;
-  const panelH = HEIGHT - 128;
+  const panelX = 40;
+  const panelY = 14;
+  const panelW = WIDTH - 80;
+  const panelH = HEIGHT - 120; // leaves room under the panel for the Set Sail button
+  const headX = panelX + (TOUCH_UI ? 140 : 32); // clear of the touch Back button
 
   ctx.fillStyle = "rgba(6, 18, 28, 0.92)";
   ctx.fillRect(panelX, panelY, panelW, panelH);
@@ -8437,133 +9536,122 @@ function drawShipSelectionScreen() {
   ctx.strokeRect(panelX, panelY, panelW, panelH);
 
   ctx.fillStyle = "#f7fbff";
-  ctx.font = "34px Segoe UI";
-  ctx.fillText("Select Your Ship", panelX + 36, panelY + 50);
-  ctx.font = "20px Segoe UI";
-  ctx.fillText(`Active Player: ${profile.name} (${slot.toUpperCase()})`, panelX + 36, panelY + 84);
-  ctx.fillText(`Mode: ${mode === "single" ? "Single Player" : "Local 2 Player"}`, panelX + 430, panelY + 84);
+  ctx.font = "bold 36px Segoe UI";
+  ctx.fillText("Select Your Ship", headX, panelY + 48);
+  ctx.font = "22px Segoe UI";
+  ctx.fillText(`${profile.name} (${slot.toUpperCase()})   |   ${mode === "single" ? "Single Player" : "Local 2 Player"}   |   ${missionById(game.voyage)?.name || "Free Play"}`, headX, panelY + 84);
 
-  drawCatalogIcon(shipDef, panelX + 140, panelY + 180, 72, true);
+  drawCatalogIcon(shipDef, panelX + 150, panelY + 200, 96, true);
   ctx.fillStyle = shipDef.color;
-  ctx.font = "28px Segoe UI";
-  ctx.fillText(shipDef.name, panelX + 200, panelY + 160);
+  ctx.font = "bold 34px Segoe UI";
+  ctx.fillText(shipDef.name, panelX + 260, panelY + 140);
   ctx.fillStyle = "#dbe9f1";
-  ctx.font = "20px Segoe UI";
-  ctx.fillText(`Category: ${categoryLabel(shipDef.category)}`, panelX + 200, panelY + 194);
-  ctx.fillText(`Hull: ${shipDef.stats.hp}`, panelX + 200, panelY + 226);
-  ctx.fillText(`Speed: ${shipDef.stats.maxSpeed}`, panelX + 200, panelY + 258);
-  ctx.fillText(`Turn: ${shipDef.stats.turnRate.toFixed(2)}`, panelX + 200, panelY + 290);
-  ctx.fillText(shipDef.desc, panelX + 200, panelY + 322);
+  ctx.font = "23px Segoe UI";
+  ctx.fillText(`${categoryLabel(shipDef.category)}`, panelX + 260, panelY + 174);
+  ctx.fillText(`Hull ${shipDef.stats.hp}     Speed ${shipDef.stats.maxSpeed}     Turn ${shipDef.stats.turnRate.toFixed(2)}`, panelX + 260, panelY + 208);
+  ctx.fillText(shipDef.desc, panelX + 260, panelY + 242, panelW - 290);
 
   ctx.fillStyle = owned ? "#89d98b" : shipDef.premiumPack ? "#d2a8ff" : "#ffb18c";
-  const statusText = owned ? "Unlocked" : shipDef.premiumPack ? `Requires ${PREMIUM_PACKS[shipDef.premiumPack].name}` : `Buy in shop for ${shipDef.cost} points`;
-  ctx.fillText(statusText, panelX + 200, panelY + 356);
+  const statusText = owned ? "Unlocked" : shipDef.premiumPack ? `Requires ${PREMIUM_PACKS[shipDef.premiumPack].name}` : `Buy in the Dockyard for ${shipDef.cost} points`;
+  ctx.fillText(statusText, panelX + 260, panelY + 276);
 
-  ctx.fillStyle = "#eef7fb";
-  ctx.font = "17px Segoe UI";
   // Two rows of tiles, so the whole fleet fits.
   const perRow = Math.ceil(SHIP_CATALOG.length / 2);
-  const spacing = Math.min(160, (panelW - 60) / perRow);
+  const spacing = (panelW - 24) / perRow;
   for (let i = 0; i < SHIP_CATALOG.length; i += 1) {
     const ship = SHIP_CATALOG[i];
-    const x = panelX + 36 + (i % perRow) * spacing;
-    const y = panelY + panelH - 182 + Math.floor(i / perRow) * 70;
+    const x = panelX + 12 + (i % perRow) * spacing;
+    const y = panelY + panelH - 232 + Math.floor(i / perRow) * 98;
+    const w = spacing - 8;
     const unlocked = isShipOwned(profile, ship);
-    if (ship.id === shipDef.id) {
-      ctx.fillStyle = "rgba(91, 145, 177, 0.45)";
-      ctx.fillRect(x - 12, y - 14, spacing - 8, 66);
-    }
-    drawCatalogIcon(ship, x + 10, y + 4, 24, true);
+    ctx.fillStyle = ship.id === shipDef.id ? "rgba(91, 145, 177, 0.55)" : "rgba(14, 40, 58, 0.85)";
+    ctx.fillRect(x, y, w, 92);
+    ctx.strokeStyle = ship.id === shipDef.id ? "#ffd182" : "rgba(166, 218, 244, 0.35)";
+    ctx.lineWidth = ship.id === shipDef.id ? 3 : 1.5;
+    ctx.strokeRect(x, y, w, 92);
+    drawCatalogIcon(ship, x + 20, y + 22, 30, true);
     ctx.fillStyle = unlocked ? ship.color : "#8d99a5";
-    ctx.fillText(categoryLabel(ship.category), x + 28, y + 10);
+    ctx.font = "bold 20px Segoe UI";
+    ctx.fillText(categoryLabel(ship.category), x + 40, y + 29, w - 46);
     ctx.fillStyle = "#cfdeea";
-    ctx.font = "14px Segoe UI";
-    ctx.fillText(ship.name, x, y + 30);
-    ctx.fillText(unlocked ? "Ready" : ship.premiumPack ? "Premium" : `${ship.cost} pts`, x, y + 46);
     ctx.font = "17px Segoe UI";
-    registerUiRect(x - 12, y - 14, spacing - 8, 66, () => {
+    ctx.fillText(ship.name, x + 8, y + 56, w - 14);
+    ctx.fillStyle = unlocked ? "#89d98b" : "#ffd182";
+    ctx.fillText(unlocked ? "Ready" : ship.premiumPack ? "Premium" : `${ship.cost} pts`, x + 8, y + 80, w - 14);
+    registerUiRect(x, y, w, 92, () => {
       game.shipSelections[slot] = ship.id;
     });
   }
 
+  if (!game.midGameChange && owned) {
+    const posts = crewPosts(shipDef.category);
+    const filled = posts.filter((p) => crewAssigned(profile, shipDef.id, p)).length;
+    drawDockButton(`Ship Crew ${filled}/${posts.length}${TOUCH_UI ? "" : " (M)"}`, panelX + panelW - 316, panelY + 18, 296, 64, "rgba(24, 73, 97, 0.9)", "rgba(166, 218, 244, 0.5)", "#e8f6ff", () => openCrewScreen(slot, shipDef.id, "shipSelect"), "cap");
+  }
+
+  const galley = !game.midGameChange && slot === "p1" && secondRowsGalley(shipDef.id);
+  const p2Next = mode === "local" && slot === "p1" && !galley;
   ctx.fillStyle = "#ffd182";
-  const p2Next = mode === "local" && slot === "p1";
-  ctx.fillText(
-    game.midGameChange
-      ? "Left/Right: Change Ship  Enter: Change Ship  Esc: Keep your current ship"
-      : `Left/Right: Change Ship  Tab: Switch Player  O: Shop  Enter: ${p2Next ? "Next Player" : "Launch"}  Esc: Back`,
-    panelX + 36, panelY + panelH - 28);
-  ctx.fillStyle = "rgba(24, 73, 57, 0.92)";
-  ctx.fillRect(panelX + panelW - 180, panelY + panelH - 58, 146, 36);
-  ctx.strokeStyle = "rgba(221, 255, 235, 0.3)";
-  ctx.strokeRect(panelX + panelW - 180, panelY + panelH - 58, 146, 36);
-  ctx.fillStyle = "#e9fff2";
-  ctx.fillText(game.midGameChange ? "Change Ship" : p2Next ? "Next: Player 2" : "Launch Round", panelX + panelW - 154, panelY + panelH - 34);
-  registerUiRect(panelX + panelW - 180, panelY + panelH - 54, 146, 32, () => confirmShipSelectionAndStart());
+  ctx.font = "17px Segoe UI";
+  if (galley) ctx.fillText("Player 2 will row the Order's galley and tow you out", panelX + 640, panelY + 276, panelW - 660);
+  if (!TOUCH_UI) {
+    ctx.fillText(
+      game.midGameChange
+        ? "Left/Right: Change Ship  Enter: Change Ship  Esc: Keep your current ship"
+        : `Left/Right: Change Ship  Tab: Switch Player  O: Dockyard  Enter: ${p2Next ? "Next Captain" : "Set Sail"}  Esc: Back`,
+      headX, panelY + panelH - 12);
+  }
+  drawNavalButton({
+    x: (WIDTH - 440) / 2, y: panelY + panelH + 10, w: 440, h: 86, primary: true, focused: true,
+    label: game.midGameChange ? "Take Command" : p2Next ? "Next Captain" : "Set Sail",
+    icon: game.midGameChange ? "wheel" : p2Next ? "captains" : "ship",
+    onClick: () => confirmShipSelectionAndStart()
+  });
 }
 
 function drawLeaderboardScreen() {
-  ctx.fillStyle = "rgba(6, 18, 28, 0.78)";
-  ctx.fillRect(190, 100, WIDTH - 380, HEIGHT - 200);
+  ctx.fillStyle = "rgba(6, 18, 28, 0.86)";
+  ctx.fillRect(150, 20, WIDTH - 300, HEIGHT - 40);
   ctx.strokeStyle = "#d7edf9";
   ctx.lineWidth = 2;
-  ctx.strokeRect(190, 100, WIDTH - 380, HEIGHT - 200);
+  ctx.strokeRect(150, 20, WIDTH - 300, HEIGHT - 40);
 
+  ctx.save();
+  ctx.textAlign = "center";
   ctx.fillStyle = "#f4fbff";
-  ctx.font = "36px Segoe UI";
-  ctx.fillText("Leaderboard", 450, 152);
+  ctx.font = "bold 40px Segoe UI";
+  ctx.fillText("Leaderboard", WIDTH / 2, 74);
 
   const entries = leaderboardEntries();
-  ctx.font = "22px Segoe UI";
+  ctx.font = "27px Segoe UI";
   if (entries.length === 0) {
-    ctx.fillText("No scores yet.", 490, 240);
+    ctx.fillText("No scores yet.", WIDTH / 2, 220);
   } else {
-    for (let i = 0; i < entries.length; i += 1) {
-      const row = entries[i];
-      ctx.fillText(`${i + 1}. ${row.name}`, 260, 220 + i * 44);
-      ctx.fillText(`${row.points}`, 820, 220 + i * 44);
-    }
+    entries.forEach((row, i) => {
+      ctx.textAlign = "left";
+      ctx.fillText(`${i + 1}. ${row.name}`, 270, 122 + i * 43);
+      ctx.textAlign = "right";
+      ctx.fillText(`${row.points}`, WIDTH - 270, 122 + i * 43);
+    });
   }
+  ctx.restore();
 
-  const clearBoardBtn = { x: 250, y: HEIGHT - 190, w: 240, h: 44 };
-  const clearP1Btn = { x: 515, y: HEIGHT - 190, w: 200, h: 44 };
-  const clearP2Btn = { x: 740, y: HEIGHT - 190, w: 200, h: 44 };
-
-  ctx.fillStyle = "rgba(110, 56, 56, 0.92)";
-  ctx.fillRect(clearBoardBtn.x, clearBoardBtn.y, clearBoardBtn.w, clearBoardBtn.h);
-  ctx.strokeStyle = "rgba(255, 194, 194, 0.45)";
-  ctx.strokeRect(clearBoardBtn.x, clearBoardBtn.y, clearBoardBtn.w, clearBoardBtn.h);
-  ctx.fillStyle = "#ffeaea";
-  ctx.font = "18px Segoe UI";
-  ctx.fillText("Clear Leaderboard", clearBoardBtn.x + 28, clearBoardBtn.y + 28);
-  registerUiRect(clearBoardBtn.x, clearBoardBtn.y, clearBoardBtn.w, clearBoardBtn.h, () => clearLeaderboardScores());
-
-  ctx.fillStyle = "rgba(56, 86, 110, 0.92)";
-  ctx.fillRect(clearP1Btn.x, clearP1Btn.y, clearP1Btn.w, clearP1Btn.h);
-  ctx.strokeStyle = "rgba(194, 227, 255, 0.45)";
-  ctx.strokeRect(clearP1Btn.x, clearP1Btn.y, clearP1Btn.w, clearP1Btn.h);
-  ctx.fillStyle = "#eaf7ff";
-  ctx.fillText("Clear P1 Points", clearP1Btn.x + 27, clearP1Btn.y + 28);
-  registerUiRect(clearP1Btn.x, clearP1Btn.y, clearP1Btn.w, clearP1Btn.h, () => clearPlayerPoints("p1"));
-
-  ctx.fillStyle = "rgba(110, 92, 56, 0.92)";
-  ctx.fillRect(clearP2Btn.x, clearP2Btn.y, clearP2Btn.w, clearP2Btn.h);
-  ctx.strokeStyle = "rgba(255, 239, 194, 0.45)";
-  ctx.strokeRect(clearP2Btn.x, clearP2Btn.y, clearP2Btn.w, clearP2Btn.h);
-  ctx.fillStyle = "#fff6e6";
-  ctx.fillText("Clear P2 Points", clearP2Btn.x + 27, clearP2Btn.y + 28);
-  registerUiRect(clearP2Btn.x, clearP2Btn.y, clearP2Btn.w, clearP2Btn.h, () => clearPlayerPoints("p2"));
-
-  ctx.fillStyle = "#ffd182";
-  ctx.font = "18px Segoe UI";
-  ctx.fillText("Esc: Back   C: Clear Leaderboard   1: Clear P1   2: Clear P2", 340, HEIGHT - 120);
+  const key = (text) => (TOUCH_UI ? "" : ` (${text})`);
+  drawDockButton(`Clear Board${key("C")}`, 175, 476, 270, 78, "rgba(110, 56, 56, 0.92)", "rgba(255, 194, 194, 0.45)", "#ffeaea", () => clearLeaderboardScores());
+  drawDockButton(`Clear P1 Points${key("1")}`, 465, 476, 270, 78, "rgba(56, 86, 110, 0.92)", "rgba(194, 227, 255, 0.45)", "#eaf7ff", () => clearPlayerPoints("p1"));
+  drawDockButton(`Clear P2 Points${key("2")}`, 755, 476, 270, 78, "rgba(110, 92, 56, 0.92)", "rgba(255, 239, 194, 0.45)", "#fff6e6", () => clearPlayerPoints("p2"));
+  drawDockButton(`Back${key("Esc")}`, WIDTH / 2 - 180, 576, 360, 78, "rgba(24, 73, 97, 0.95)", "rgba(166, 218, 244, 0.5)", "#e8f6ff", () => { gameState = "menu"; }, "back");
 }
 
 function getEndButtons() {
-  return [
-    { label: "Menu", x: 440, y: 390, w: 150, h: 48, idleColor: "rgba(56, 86, 110, 0.92)", idleStroke: "rgba(194, 227, 255, 0.45)", textColor: "#eaf7ff", action: () => { gameState = "menu"; } },
-    { label: "Relaunch", x: 610, y: 390, w: 150, h: 48, idleColor: "rgba(27, 98, 72, 0.92)", idleStroke: "rgba(196, 255, 224, 0.45)", textColor: "#e7fff4", action: () => openShipSelect() }
+  const buttons = [
+    { label: "Harbour", icon: "buoy", idleColor: "rgba(56, 86, 110, 0.92)", idleStroke: "rgba(194, 227, 255, 0.45)", textColor: "#eaf7ff", action: () => { gameState = "menu"; } },
+    { label: "Sail Again", icon: "ship", idleColor: "rgba(27, 98, 72, 0.92)", idleStroke: "rgba(196, 255, 224, 0.45)", textColor: "#e7fff4", action: () => openShipSelect() }
   ];
+  if (game.mission) buttons.push({ label: "Missions", icon: "trophy", idleColor: "rgba(110, 82, 40, 0.92)", idleStroke: "rgba(255, 226, 180, 0.45)", textColor: "#fff2dc", action: openMissions });
+  const w = 280;
+  const left = (WIDTH - buttons.length * (w + 24) + 24) / 2;
+  return buttons.map((b, i) => ({ ...b, x: left + i * (w + 24), y: 380, w, h: 92 }));
 }
 
 // Long result strings drawn at 300,300 with no wrapping used to run past
@@ -8594,8 +9682,8 @@ function formatGameTime(seconds) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-// 2-player game over: each captain's ship, points earned in this game, the
-// level they reached and when they sank; the higher score wins.
+// 2-player game over: each captain's ship, points earned in this game and
+// when they sank; the higher score wins.
 function drawGameSummary() {
   const ships = [game.player1, game.player2].filter(Boolean);
   const points = (ship) => game.gamePoints[ship.playerSlot] || 0;
@@ -8630,15 +9718,16 @@ function drawGameSummary() {
     ctx.font = "bold 20px Segoe UI";
     ctx.fillText(String(points(ship)), cols[2], y);
     ctx.font = "16px Segoe UI";
-    ctx.fillText(ship.outAt !== undefined ? `Level ${ship.outLevel}, ${formatGameTime(ship.outAt)}` : "-", cols[3], y);
+    ctx.fillText(ship.outAt !== undefined ? formatGameTime(ship.outAt) : "-", cols[3], y);
   });
   ctx.font = "15px Segoe UI";
   ctx.fillStyle = "#cfe3ee";
   ctx.textAlign = "center";
-  // Levels completed = times Harbour B was reached (the game starts on level 1).
   const tie = winners.length > 1 ? "A draw - " : "";
-  const done = (game.level || 1) - 1;
-  const progress = done === 0 ? "sank before reaching Harbour B" : `${done} level${done === 1 ? "" : "s"} completed`;
+  const done = game.crossings;
+  const progress = game.mission
+    ? (game.missionWon ? "mission complete" : "mission failed")
+    : done === 0 ? "sank before reaching Harbour B" : `${done} crossing${done === 1 ? "" : "s"} completed`;
   ctx.fillText(`${tie}${progress} - game time ${formatGameTime(game.elapsed)}`, WIDTH / 2, 328);
   ctx.textAlign = "left";
 }
@@ -8653,33 +9742,30 @@ function drawEndScreen() {
   if (summary) drawGameSummary();
   ctx.fillStyle = "#f7fbff";
   ctx.font = "24px Segoe UI";
-  ctx.fillText("Arrow Keys: Navigate   Enter: Select", 420, summary ? 480 : 350);
+  if (!TOUCH_UI) {
+    ctx.textAlign = "center";
+    ctx.fillText("Arrow Keys: Navigate   Enter: Select", WIDTH / 2, summary ? 512 : 350);
+    ctx.textAlign = "left";
+  }
 
   ctx.font = "22px Segoe UI";
   const endButtons = getEndButtons();
   for (let i = 0; i < endButtons.length; i++) {
     const button = endButtons[i];
-    const focused = i === game.endedIndex;
-    ctx.fillStyle = button.idleColor;
-    ctx.fillRect(button.x, button.y, button.w, button.h);
-    ctx.strokeStyle = focused ? "rgba(255, 214, 130, 0.95)" : button.idleStroke;
-    ctx.lineWidth = focused ? 3 : 2;
-    ctx.strokeRect(button.x, button.y, button.w, button.h);
-    ctx.lineWidth = 2;
-    ctx.fillStyle = button.textColor;
-    ctx.fillText(button.label, button.x + (button.label === "Menu" ? 44 : 22), button.y + 31);
-    registerUiRect(button.x, button.y, button.w, button.h, () => {
-      game.endedIndex = i;
-      button.action();
-    });
+    drawDockButton(button.label, button.x, button.y, button.w, button.h, button.idleColor,
+      i === game.endedIndex ? "#ffd682" : button.idleStroke, button.textColor, () => {
+        game.endedIndex = i;
+        button.action();
+      }, button.icon);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Cannon cinematic: when a pirate fires, the top-down "plan" view cuts to a
-// full-frame pseudo-3D close-up of the pirate's cannon firing at the player,
-// then fades back. The world is frozen while it plays (see tick()), so the
-// player never loses anything they could have reacted to.
+// Cannon cinematic: when a pirate fires, the view cuts to a full-screen
+// close-up of the pirate's cannon firing at the ship it hits, then back. The
+// 3D view films it in the world itself (render3d.js updateCannonShot); the
+// painted scene below is for the 2D view. The world is frozen while it plays
+// (see tick()), so the player never loses anything they could have reacted to.
 // ---------------------------------------------------------------------------
 const CANNON_CINEMATIC_DURATION = 1.7;
 const CANNON_CINEMATIC_FIRE_AT = 0.28;
@@ -8706,6 +9792,9 @@ function startCannonCinematic(attacker, target) {
     elapsed: 0,
     fired: false,
     smoke,
+    attacker,
+    target,
+    targetBurning: !!target.fire, // before the shot lands
     pirateName: attacker.shipName || "Pirate Raider",
     targetName: target.playerName || "your ship",
     targetColor: target.displayColor || (target.type === "cruise" ? "#3d8fe0" : "#e0a23d")
@@ -8775,9 +9864,30 @@ function drawCannonCinematic() {
   // Snap in fast, fade back out to the plan view at the end.
   const fadeIn = clamp(t / 0.08, 0, 1);
   const fadeOut = clamp((CANNON_CINEMATIC_DURATION - t) / 0.3, 0, 1);
+  const alpha = Math.min(fadeIn, fadeOut);
+
+  // In 3D the scene is already on screen behind this layer: only the words.
+  if (!view3d.active) drawCinematicScene2d(cin, t, sinceFire, alpha);
 
   ctx.save();
-  ctx.globalAlpha = Math.min(fadeIn, fadeOut);
+  ctx.globalAlpha = alpha;
+  ctx.textAlign = "center";
+  ctx.shadowColor = "rgba(0, 0, 0, 0.9)";
+  ctx.shadowBlur = 10;
+  ctx.font = "bold 30px Segoe UI";
+  ctx.fillStyle = "#ffd75e";
+  ctx.fillText(fired ? "FIRE!" : `${cin.pirateName} takes aim...`, WIDTH / 2, 40);
+  ctx.font = "16px Segoe UI";
+  ctx.fillStyle = "#d8e8f2";
+  ctx.fillText(`Pirate cannon aimed at ${cin.targetName}`, WIDTH / 2, HEIGHT - 24);
+  ctx.restore();
+}
+
+function drawCinematicScene2d(cin, t, sinceFire, alpha) {
+  const fired = sinceFire >= 0;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
 
   // Camera: slow push-in, plus a shake right after the shot.
   const push = 1.06 - 0.06 * clamp(t / CANNON_CINEMATIC_DURATION, 0, 1);
@@ -8846,24 +9956,16 @@ function drawCannonCinematic() {
 
   // Overlay elements are drawn without camera shake.
   ctx.save();
-  ctx.globalAlpha = Math.min(fadeIn, fadeOut);
+  ctx.globalAlpha = alpha;
 
   // Cinematic letterbox bars.
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, WIDTH, 58);
   ctx.fillRect(0, HEIGHT - 58, WIDTH, 58);
 
-  ctx.textAlign = "center";
-  ctx.font = "bold 30px Segoe UI";
-  ctx.fillStyle = "#ffd75e";
-  ctx.fillText(fired ? "FIRE!" : `${cin.pirateName} takes aim...`, WIDTH / 2, 40);
-  ctx.font = "16px Segoe UI";
-  ctx.fillStyle = "#d8e8f2";
-  ctx.fillText(`Pirate cannon aimed at ${cin.targetName}`, WIDTH / 2, HEIGHT - 24);
-
   // White flash at the moment of firing.
   if (fired && sinceFire < 0.14) {
-    ctx.globalAlpha = Math.min(fadeIn, fadeOut) * (1 - sinceFire / 0.14) * 0.85;
+    ctx.globalAlpha = alpha * (1 - sinceFire / 0.14) * 0.85;
     ctx.fillStyle = "#fff8e0";
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
   }
@@ -9187,24 +10289,69 @@ function drawCinematicImpact(x, y, age) {
   }
 }
 
-// The ship's fire alarm: in the bridge view, while your ship is burning
-// (lava, fire bombs...), the alarm rings (audio.js) and the screen border
-// flashes red (style.css body.fire-alarm). Quiet while paused.
-function fireAlarmOn() {
+// In danger of capsizing: the hull nearly gone, a tsunami coming at her side,
+// or the throat of a whirlpool close by.
+const DANGER_HULL = 0.25; // share of full health
+const DANGER_WHIRL_STRENGTH = 0.35;
+const DANGER_WHIRL_REACH = 0.4; // share of the whirlpool's radius
+
+function inCapsizeDanger(ship) {
+  if (!ship || ship.capsized) return false;
+  if (ship.hp <= ship.maxHull * DANGER_HULL) return true;
+  if (tsunami.state !== "dormant" && !tsunami.passed.has(ship) && !shipFacesTsunami(ship)) return true;
+  return whirlpool.state === "active" && whirlpool.strength > DANGER_WHIRL_STRENGTH && dist(ship, whirlpool) < whirlpool.r * DANGER_WHIRL_REACH;
+}
+
+// The ship's alarm: in the bridge view, while your ship is burning (lava, fire
+// bombs...) or in danger of capsizing, the alarm rings (audio.js) and the
+// screen border flashes red (style.css body.bridge-alarm). Quiet while paused.
+function bridgeAlarmOn() {
   if (gameState !== "playing" || game.exitConfirm || game.cannonCinematic) return false;
   if (!view3d.active || game.settings.cameraView !== "bridge") return false;
-  const ships = mode === "local" ? [game.player1, game.player2] : [game.player1];
-  return ships.some((ship) => ship && ship.fire && !ship.capsized);
+  return humanShips().some((ship) => !ship.capsized && (ship.fire || inCapsizeDanger(ship)));
+}
+
+// Every captain's ship is down: the 3D view is under the sea with the wreck
+// (render3d.js), for SINK_SCENE_TIME and then behind the end screen.
+const SINK_SCENE_TIME = 7; // seconds
+
+function underwaterView() {
+  // (a ship that went over a waterfall is watched from above, falling)
+  return view3d.active && !game.cannonCinematic && (gameState === "playing" || gameState === "ended") && humanShips().every((ship) => ship.capsized) && !humanShips().some((ship) => ship.overFalls !== undefined);
+}
+
+function capsizedMessage() {
+  return humanShips().length > 1 ? "Both ships capsized" : "Ship capsized";
+}
+
+function drawCapsizedCaption() {
+  const age = game.elapsed - Math.max(...humanShips().map((ship) => ship.sankAt));
+  ctx.save();
+  ctx.globalAlpha = clamp(age - 1.5, 0, 1);
+  ctx.textAlign = "center";
+  ctx.font = "bold 54px Segoe UI";
+  ctx.shadowColor = "rgba(0, 0, 0, 0.8)";
+  ctx.shadowBlur = 14;
+  ctx.fillStyle = "#ffe3dc";
+  ctx.fillText(capsizedMessage().toUpperCase(), WIDTH / 2, HEIGHT - 110);
+  ctx.restore();
 }
 
 function render() {
-  document.body.classList.toggle("playing-mode", gameState === "playing" || gameState === "levelTransition");
-  document.body.classList.toggle("fire-alarm", fireAlarmOn());
+  document.body.classList.toggle("playing-mode", gameState === "playing" || gameState === "arrival");
+  document.body.classList.toggle("bridge-alarm", bridgeAlarmOn());
+  document.body.classList.toggle("cannon-shot", !!game.cannonCinematic);
   document.body.classList.toggle("at-main-menu", gameState === "menu");
   document.body.classList.toggle("in-dockyard", gameState === "shop");
+  document.body.classList.toggle("docking", dockLoading());
+  document.body.classList.toggle("era-changing", eraLoading());
+  if (eraLoading()) document.getElementById("eraStatus").textContent = view3d.eraChange;
 
   clearUiRects();
+  reserveHudBoxes();
   ctx.clearRect(0, 0, WIDTH, HEIGHT);
+  // The 3D cannon shot has the whole screen: no labels, instruments or map.
+  if (view3d.active && game.cannonCinematic) return;
 
   // With the 3D view on, this canvas is a transparent layer over it and only
   // carries labels, HUD and menus; the world itself is drawn by render3d.js.
@@ -9226,6 +10373,7 @@ function render() {
     updateView2d();
     ctx.save();
     applyWorldTransform2d();
+    drawMissionTerrain2d();
     drawHarbourDiscs();
     for (const s of game.iceSheets) ctx.drawImage(s.canvas, s.x - s.r, s.y - s.r, s.r * 2, s.r * 2);
     drawHazards();
@@ -9241,49 +10389,72 @@ function render() {
     if (game.settings.nightMode) drawNight2d();
     ctx.restore();
   }
-  drawHarbours();
-  drawShip(game.player1, game.player1 ? game.player1.playerName : "P1");
-  if (mode === "local") drawShip(game.player2, game.player2 ? `${game.player2.playerName}` : "P2");
-  if (mode === "single") drawShip(game.ai, "CPU Pirate");
-  if (mode === "single") drawPirateRaiders();
-  if (!view3d.active) {
-    ctx.save();
-    applyWorldTransform2d();
-    drawCarrierJets2d();
-    ctx.restore();
+  // Under the sea there are no surface labels, warnings or instruments, and
+  // the harbour behind the menus is just the scene.
+  const underwater = underwaterView();
+  if (game.harbourShip) {
+    if (!view3d.active) {
+      ctx.save();
+      applyWorldTransform2d();
+      drawShipBody(game.harbourShip);
+      ctx.restore();
+    }
+  } else if (!underwater) {
+    drawHarbours();
+    drawShip(game.player1, game.player1 ? game.player1.playerName : "P1");
+    if (mode === "local") drawShip(game.player2, game.player2 ? `${game.player2.playerName}` : "P2");
+    if (mode === "single") drawShip(game.ai, "CPU Pirate");
+    if (game.galley) drawShip(game.galley.boat, "Order's galley");
+    if (piratesAbout()) drawPirateRaiders();
+    if (!view3d.active) {
+      ctx.save();
+      applyWorldTransform2d();
+      drawCarrierJets2d();
+      ctx.restore();
+    }
+    if (mode === "single") drawPirateCallout();
+    if (!view3d.active) drawFog2d();
+    drawFloatingScores();
+    drawTargetAlerts();
+    drawTsunamiWarning();
   }
-  if (mode === "single") drawPirateCallout();
-  if (!view3d.active) drawFog2d();
-  drawFloatingScores();
-  drawTargetAlerts();
-  drawTsunamiWarning();
 
-  if (gameState === "playing" || gameState === "levelTransition") {
+  if (underwater && gameState === "playing") {
+    drawCapsizedCaption();
+  } else if (gameState === "playing" || gameState === "arrival") {
+    drawCrewCourse();
+    drawMissionSites();
     drawHud();
+    drawMissionPanel();
     drawBridgeInstruments();
     drawSplitDivider();
     drawMiniMap();
     drawFirePrompts();
     drawPlayersOut();
     drawBerthPrompts();
+    drawTowPrompts();
+    drawWindAlerts();
     drawReadyToSail();
+    drawCrewHud();
   }
 
   if (gameState === "menu") drawMenu();
+  if (gameState === "voyage") drawVoyageScreen();
+  if (gameState === "missions") drawMissionsScreen();
   if (gameState === "settings") drawSettingsScreen();
   if (gameState === "shipSelect") drawShipSelectionScreen();
   if (gameState === "leaderboard") drawLeaderboardScreen();
   if (gameState === "premium") drawPremiumScreen();
+  if (gameState === "crew") drawCrewScreen();
   if (gameState === "ended") drawEndScreen();
-  if (gameState === "levelTransition") drawLevelTransition();
+  if (gameState === "arrival") drawArrival();
 }
 
-// Animated "Level N" card: the number scales/fades in over ~0.5s, then the
+// Free Play's "Harbour reached" card: it scales/fades in over ~0.5s, then the
 // whole card gently bobs and the prompt pulses until the player presses a
 // key to resume - the frozen game world stays visible underneath.
-function drawLevelTransition() {
-  const t = game.levelTransition ? game.levelTransition.elapsed : 0;
-  const level = game.levelTransition ? game.levelTransition.level : game.level;
+function drawArrival() {
+  const t = game.arrival ? game.arrival.elapsed : 0;
 
   ctx.fillStyle = "rgba(4, 13, 20, 0.72)";
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
@@ -9302,7 +10473,7 @@ function drawLevelTransition() {
   ctx.font = "bold 66px Segoe UI";
   ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
   ctx.shadowBlur = 12;
-  ctx.fillText(`LEVEL ${level}`, 0, 0);
+  ctx.fillText("HARBOUR REACHED", 0, 0);
   ctx.restore();
 
   ctx.save();
@@ -9313,7 +10484,7 @@ function drawLevelTransition() {
   ctx.fillText("New waters ahead \u2014 fresh hazards, storms, and sea creatures", WIDTH / 2, HEIGHT / 2 + 20);
 
   // The prompt appears once the arrival music has finished.
-  if (levelTransitionReady()) {
+  if (arrivalReady()) {
     const promptBlink = 0.45 + 0.55 * Math.sin(t * 5.2);
     ctx.globalAlpha = eased * promptBlink;
     ctx.fillStyle = "#bfe9ff";
@@ -9325,8 +10496,8 @@ function drawLevelTransition() {
 
 // True once the arrival music has finished (real time, so time spent in
 // another window counts).
-function levelTransitionReady() {
-  return !game.levelTransition || performance.now() >= (game.levelTransition.readyAt || 0);
+function arrivalReady() {
+  return !game.arrival || performance.now() >= (game.arrival.readyAt || 0);
 }
 
 function openExitConfirm() {
@@ -9370,8 +10541,8 @@ function drawExitConfirm() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = "rgba(2, 10, 18, 0.6)";
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
-  const w = 520;
-  const h = 210;
+  const w = 660;
+  const h = 260;
   const x = (WIDTH - w) / 2;
   const y = (HEIGHT - h) / 2;
   ctx.fillStyle = "rgba(9, 26, 40, 0.97)";
@@ -9381,20 +10552,20 @@ function drawExitConfirm() {
   ctx.strokeRect(x, y, w, h);
   ctx.textAlign = "center";
   ctx.fillStyle = "#e9f8ff";
-  ctx.font = "28px Segoe UI";
-  ctx.fillText("Leave this voyage?", WIDTH / 2, y + 50);
-  ctx.font = "17px Segoe UI";
+  ctx.font = "bold 34px Segoe UI";
+  ctx.fillText("Leave this voyage?", WIDTH / 2, y + 52);
+  ctx.font = "20px Segoe UI";
   ctx.fillStyle = "#a9cbe0";
-  ctx.fillText("The game is paused. Points earned so far are kept.", WIDTH / 2, y + 84);
+  ctx.fillText("The game is paused. Points earned so far are kept.", WIDTH / 2, y + 90);
   const buttons = [
     { label: "Return to Menu", leave: true },
     { label: "Keep Sailing", leave: false }
   ];
   buttons.forEach((b, i) => {
-    const bw = 200;
-    const bh = 48;
-    const bx = WIDTH / 2 - bw - 12 + i * (bw + 24);
-    const by = y + 118;
+    const bw = 290;
+    const bh = 90;
+    const bx = WIDTH / 2 - bw - 14 + i * (bw + 28);
+    const by = y + 116;
     const selected = box.choice === i;
     ctx.fillStyle = i === 0 ? "rgba(110, 40, 34, 0.92)" : "rgba(24, 92, 70, 0.92)";
     ctx.fillRect(bx, by, bw, bh);
@@ -9402,13 +10573,13 @@ function drawExitConfirm() {
     ctx.lineWidth = selected ? 3 : 1.5;
     ctx.strokeRect(bx, by, bw, bh);
     ctx.fillStyle = "#f3fbff";
-    ctx.font = "19px Segoe UI";
-    ctx.fillText(b.label, bx + bw / 2, by + 30);
+    ctx.font = "bold 26px Segoe UI";
+    ctx.fillText(b.label, bx + bw / 2, by + 55);
     registerUiRect(bx, by, bw, bh, () => closeExitConfirm(b.leave));
   });
   ctx.font = "14px Segoe UI";
   ctx.fillStyle = "#8fb4c8";
-  ctx.fillText("Arrow keys to choose, Enter to confirm, Esc to keep sailing", WIDTH / 2, y + h - 14);
+  if (!TOUCH_UI) ctx.fillText("Arrow keys to choose, Enter to confirm, Esc to keep sailing", WIDTH / 2, y + h - 16);
   ctx.restore();
 }
 
@@ -9443,19 +10614,68 @@ function keepPer60(factor, dt) {
   return Math.pow(factor, dt * 60);
 }
 
-// The "please wait" screen (index.html #loading) stays up until the 3D view
-// has started and frames come smoothly: the first 3D frames can take several
-// seconds on a phone. It goes after LOADING_MAX_MS whatever happens.
+// The intro (index.html #loading) stays up until the 3D view has started and
+// frames come smoothly (the first 3D frames can take several seconds on a
+// phone) and its text has been shown; a key or tap skips the rest of it once
+// the game is ready. It counts as ready after LOADING_MAX_MS whatever happens,
+// but it never goes before the licence agreement is accepted.
 const LOADING_SMOOTH_FRAMES = 20;
 const LOADING_SLOW_FRAME = 0.25; // seconds
 const LOADING_MAX_MS = 60000; // room for the first-start graphics check on a slow device
+const INTRO_MS = 7500; // the last intro line has then been up for a couple of seconds
 let loadingSmoothFrames = 0;
+let introReady = false;
+let introSkipped = false;
+
+function setLoadingStatus(text) {
+  document.getElementById("loadingStatus").textContent = text;
+}
+
+// The licence agreement (index.html #eula) is on the intro until accepted.
+// Once accepted it is never shown again, also after game updates.
+const EULA_KEY = "harbour-run-eula";
+let eulaAccepted = localStorage.getItem(EULA_KEY) !== null;
+document.body.classList.toggle("eula-pending", !eulaAccepted);
+// Focus the text, not a button, so a stray key press can't accept it.
+if (!eulaAccepted) document.getElementById("eulaText").focus();
+
+function readyStatus() {
+  if (!eulaAccepted) return "Ready - accept the agreement to play";
+  return TOUCH_UI ? "Ready - tap to continue" : "Ready - press any key to continue";
+}
+
+// This click also reaches the intro's own handler (skipIntro), so a game that
+// is already loaded starts at once.
+document.getElementById("eulaAccept").addEventListener("click", () => {
+  localStorage.setItem(EULA_KEY, "accepted");
+  eulaAccepted = true;
+  document.body.classList.remove("eula-pending");
+  if (introReady) setLoadingStatus(readyStatus());
+});
+
+// The Android app closes; a browser page can't close itself, so it stays here.
+document.getElementById("eulaDecline").addEventListener("click", () => {
+  document.getElementById("eulaNote").textContent = "You can't play without accepting. If you do not agree, close the game.";
+  exitApp();
+});
 
 function updateLoadingScreen(now, rawDt) {
   if (document.body.classList.contains("loaded")) return;
   loadingSmoothFrames = view3d.startupDone && rawDt < LOADING_SLOW_FRAME ? loadingSmoothFrames + 1 : 0;
-  if (loadingSmoothFrames >= LOADING_SMOOTH_FRAMES || now > LOADING_MAX_MS) document.body.classList.add("loaded");
+  if (!introReady && (loadingSmoothFrames >= LOADING_SMOOTH_FRAMES || now > LOADING_MAX_MS)) {
+    introReady = true;
+    setLoadingStatus(readyStatus());
+    playIntro(); // the music starts once the intro has loaded, not during loading
+  }
+  if (introReady && eulaAccepted && (introSkipped || now >= INTRO_MS)) document.body.classList.add("loaded");
 }
+
+function skipIntro() {
+  ensureAudio(); // the first key or tap also starts the intro music
+  if (introReady) introSkipped = true;
+}
+
+document.getElementById("loading").addEventListener("click", skipIntro);
 
 function tick(now) {
   const rawDt = Math.min(0.1, Math.max(0, (now - lastTime) / 1000));
@@ -9479,8 +10699,8 @@ function tick(now) {
   const steps = Math.ceil(smoothDt / SIM_STEP_MAX);
   const dt = frameDt / steps;
 
-  if (gameState === "levelTransition" && game.levelTransition) {
-    game.levelTransition.elapsed += frameDt;
+  if (gameState === "arrival" && game.arrival) {
+    game.arrival.elapsed += frameDt;
   }
 
   // Counts down on every screen (shop messages too), not just while sailing.
@@ -9493,7 +10713,7 @@ function tick(now) {
   // popup is open.
   if (game.cannonCinematic) {
     updateCannonCinematic(frameDt);
-  } else if ((game.exitConfirm || game.tugOffer) && gameState === "playing") {
+  } else if (((game.exitConfirm || game.tugOffer) && gameState === "playing") || eraLoading()) {
     // paused
   } else {
     for (let i = 0; i < steps; i += 1) {
@@ -9502,6 +10722,7 @@ function tick(now) {
     }
   }
   updateSound(frameDt);
+  updateHarbourScene();
   // 3D first, so labels on the 2D layer use this frame's camera.
   if (view3d.active) view3d.render(frameDt);
   render();
@@ -9529,13 +10750,16 @@ function menuSnapshot() {
   return JSON.stringify([
     gameState, mode, game.menuIndex, game.shopIndex, game.shopSlot, game.endedIndex,
     game.shipSelectSlot, game.shipSelections, game.keyRebindAction, game.settings,
-    game.uiMessage, game.uiMessageTtl, game.profiles, store.busy
+    game.uiMessage, game.uiMessageTtl, game.profiles, store.busy, game.crewView, game.voyageIndex, game.missionIndex
   ]);
 }
 
 window.addEventListener("keydown", (e) => {
-  if (!document.body.classList.contains("loaded")) return; // still loading (or checking the graphics)
-  const inMenu = gameState !== "playing" && gameState !== "levelTransition" && !game.keyRebindAction;
+  if (!document.body.classList.contains("loaded")) {
+    skipIntro(); // still on the intro: the key does nothing else
+    return;
+  }
+  const inMenu = gameState !== "playing" && gameState !== "arrival" && !game.keyRebindAction;
   const arrow = inMenu ? menuArrowFor(e.code) : null;
   const code = arrow || e.code;
   const before = inMenu ? menuSnapshot() : null;
@@ -9545,6 +10769,11 @@ window.addEventListener("keydown", (e) => {
 
 function handleKeyDown(e) {
   ensureAudio();
+  // While the rename popup is open, keys only type into it.
+  if (!renamePopup.hidden) {
+    if (e.code === "Escape") closeRenamePopup(false);
+    return;
+  }
   const blockScrollKeys = new Set([
     "ArrowUp",
     "ArrowDown",
@@ -9596,32 +10825,46 @@ function handleKeyDown(e) {
     openExitConfirm();
     return;
   }
-  if (gameState === "levelTransition" && !levelTransitionReady()) {
+  if (gameState === "arrival" && !arrivalReady()) {
     return; // still playing the arrival music
   }
   keys.add(e.code);
 
-  if (gameState === "levelTransition") {
+  if (gameState === "arrival") {
     gameState = "playing";
-    game.levelTransition = null;
+    game.arrival = null;
+    return;
+  }
+
+  if (gameState === "voyage" || gameState === "missions") {
+    handleVoyageKey(e.code);
+    return;
+  }
+
+  if (gameState === "crew") {
+    if (e.code === "Backspace") e.preventDefault();
+    handleCrewKey(e.code);
     return;
   }
 
   if (e.code === "Digit1" && gameState === "menu") {
     mode = "single";
-    openShipSelect();
+    openVoyageChoice();
+    return;
   }
   if (e.code === "Digit2" && gameState === "menu") {
     mode = "local";
-    openShipSelect();
+    openVoyageChoice();
+    return;
   }
   if (e.code === "Enter" && gameState === "menu") {
     getMenuButtons()[game.menuIndex].action();
     return;
   }
   if (gameState === "ended") {
-    if (e.code === "ArrowLeft") game.endedIndex = clamp(game.endedIndex - 1, 0, 1);
-    if (e.code === "ArrowRight") game.endedIndex = clamp(game.endedIndex + 1, 0, 1);
+    const last = getEndButtons().length - 1;
+    if (e.code === "ArrowLeft") game.endedIndex = clamp(game.endedIndex - 1, 0, last);
+    if (e.code === "ArrowRight") game.endedIndex = clamp(game.endedIndex + 1, 0, last);
     if (e.code === "Escape") gameState = "menu";
     if (e.code === "Enter") {
       getEndButtons()[game.endedIndex].action();
@@ -9634,17 +10877,21 @@ function handleKeyDown(e) {
   }
 
   if (gameState === "menu") {
-    if (e.code === "ArrowUp") moveMenuSelection(-1, 0);
-    if (e.code === "ArrowDown") moveMenuSelection(1, 0);
-    if (e.code === "ArrowLeft") moveMenuSelection(0, -1);
-    if (e.code === "ArrowRight") moveMenuSelection(0, 1);
+    if (e.code === "ArrowLeft") moveMenuSelection(-1);
+    if (e.code === "ArrowRight") moveMenuSelection(1);
+    if (e.code === "ArrowUp" && game.menuIndex === 0) moveMenuSelection(1);
+    if (e.code === "ArrowDown") game.menuIndex = 0;
     if (e.code === "KeyO") {
       openShop("p1");
+    }
+    if (e.code === "KeyM") {
+      openCrewScreen("p1");
     }
     if (e.code === "KeyL") {
       gameState = "leaderboard";
     }
     if (e.code === "KeyN") {
+      e.preventDefault(); // or the "n" is typed into the popup
       renameShopProfile();
     }
     if (e.code === "KeyP") {
@@ -9689,11 +10936,17 @@ function handleKeyDown(e) {
     if (e.code === "KeyO" && !game.midGameChange) {
       openShop(game.shipSelectSlot);
     }
+    if (e.code === "KeyM" && !game.midGameChange) {
+      const picked = getShipDefinition(game.shipSelections[game.shipSelectSlot]);
+      if (isShipOwned(getProfile(game.shipSelectSlot), picked)) openCrewScreen(game.shipSelectSlot, picked.id, "shipSelect");
+      else setUiMessage(`${picked.name} is not yours yet, so it has no crew`);
+    }
     if (e.code === "Enter") confirmShipSelectionAndStart();
   }
 
   if (gameState === "shop") {
     if (e.code === "Escape") gameState = "menu";
+    else if (dockLoading()) return;
     else if (dockClipPlaying()) skipDockClip();
     else {
       if (e.code.startsWith("Arrow")) {
@@ -9709,7 +10962,10 @@ function handleKeyDown(e) {
         e.preventDefault();
         sellSelectedItem();
       }
-      if (e.code === "KeyN") renameShopProfile();
+      if (e.code === "KeyN") {
+        e.preventDefault();
+        renameShopProfile();
+      }
       if (e.code === "KeyV") game.dock.hideUi = !game.dock.hideUi;
       if (e.code === "KeyP") togglePremiumPackForTesting();
     }
@@ -9735,6 +10991,11 @@ function handleKeyDown(e) {
     const is = (action) => !!kb[action] && e.code === kb[action];
     if (is("cameraView")) toggleCameraView();
     if (is("nightMode")) toggleNightMode();
+    // + and - size the corner map, unless a captain has bound that key
+    if (!Object.values(kb).includes(e.code)) {
+      if (e.code === "Equal" || e.code === "NumpadAdd") resizeMiniMap(1);
+      if (e.code === "Minus" || e.code === "NumpadSubtract") resizeMiniMap(-1);
+    }
     // not on key repeat, or holding the key flips the bridge camera back and forth
     if (is("p1Bridge") && !e.repeat && game.settings.cameraView === "bridge") toggleBridgeFocus("p1");
     if (is("p2Bridge") && !e.repeat && mode === "local" && game.settings.cameraView === "bridge") toggleBridgeFocus("p2");
@@ -9823,9 +11084,10 @@ function moveTouch(point, e) {
   touchGesture.moved += Math.abs(dx) + Math.abs(dy);
   if (touchPoints.size >= 2) {
     const dist = touchPinchDistance();
-    if (touchGesture.pinchDist > 0 && dist > 0) zoomView(touchGesture.pinchDist / dist); // spread = closer
+    const [a, b] = touchPoints.values();
+    if (touchGesture.pinchDist > 0 && dist > 0) zoomView(touchGesture.pinchDist / dist, (a.x + b.x) / 2, (a.y + b.y) / 2); // spread = closer
     touchGesture.pinchDist = dist;
-  } else if (view3d.active && game.settings.cameraView === "bridge") {
+  } else if (view3d.active && game.settings.cameraView === "bridge" && gameState === "playing") {
     turnBridgeLook(bridgeSlotAt(e.clientX), dx, dy);
   } else {
     orbitView(dx, dy);
@@ -9836,7 +11098,7 @@ function endTouch(e, tap) {
   if (!touchPoints.delete(e.pointerId)) return false;
   touchGesture.pinchDist = touchPoints.size >= 2 ? touchPinchDistance() : 0;
   if (tap && touchPoints.size === 0 && touchGesture.moved < TOUCH_TAP_MOVE) {
-    if (!handlePointerInteraction(e.clientX, e.clientY) && view3d.active && game.settings.cameraView === "bridge") {
+    if (!handlePointerInteraction(e.clientX, e.clientY) && view3d.active && game.settings.cameraView === "bridge" && gameState === "playing") {
       const look = bridgeLook[bridgeSlotAt(e.clientX)];
       look.yaw = 0;
       look.pitch = 0;
@@ -9847,8 +11109,9 @@ function endTouch(e, tap) {
 
 canvas.addEventListener("pointerdown", (e) => {
   e.preventDefault();
-  if (e.pointerType !== "touch" && gameState === "playing" && view3d.active && game.settings.cameraView !== "bridge") {
-    // Overview and chase: the mouse (either button) drags the camera round.
+  const sailingOrbit = gameState === "playing" && view3d.active && game.settings.cameraView !== "bridge";
+  if (e.pointerType !== "touch" && (sailingOrbit || (e.button === 2 && onMenuShip()))) {
+    // Overview, chase and main menu: the mouse (either button) drags the camera round.
     orbitDrag = { x: e.clientX, y: e.clientY };
     canvas.setPointerCapture(e.pointerId);
     if (e.button === 2) return;
@@ -9859,12 +11122,12 @@ canvas.addEventListener("pointerdown", (e) => {
     canvas.setPointerCapture(e.pointerId);
     return;
   }
-  if (gameState === "levelTransition") {
+  if (gameState === "arrival") {
     pressVirtualKey("Enter"); // a tap works like "press any key"
     releaseVirtualKey("Enter");
     return;
   }
-  if (e.pointerType === "touch" && gameState === "playing") {
+  if (e.pointerType === "touch" && (gameState === "playing" || onMenuShip())) {
     canvas.setPointerCapture(e.pointerId);
     if (touchPoints.size === 0) touchGesture = { moved: 0, pinchDist: 0 };
     touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -9874,7 +11137,10 @@ canvas.addEventListener("pointerdown", (e) => {
     }
     return;
   }
-  handlePointerInteraction(e.clientX, e.clientY);
+  if (!handlePointerInteraction(e.clientX, e.clientY) && onMenuShip()) {
+    orbitDrag = { x: e.clientX, y: e.clientY };
+    canvas.setPointerCapture(e.pointerId);
+  }
 });
 
 canvas.addEventListener("pointermove", (e) => {
@@ -9999,7 +11265,7 @@ window.harbourAndroid = {
   // Phone Back button: works like Esc. Returns false on the main menu, where
   // the app closes instead.
   back() {
-    if (gameState === "menu" && !game.exitConfirm) return false;
+    if (gameState === "menu" && !game.exitConfirm && renamePopup.hidden) return false;
     pressVirtualKey("Escape");
     releaseVirtualKey("Escape");
     return true;
@@ -10016,8 +11282,11 @@ window.harbourAndroid = {
 
 // Overview and chase views: the mouse wheel zooms in on your ship and back
 // out (1 = the standard view). The bridge view stays where the captain stands.
-const VIEW_ZOOM_LIMITS = { overview: [0.25, 1.6], chase: [0.35, 2.5] };
+const VIEW_ZOOM_LIMITS = { overview: [0.012, 1.6], chase: [0.05, 2.5] };
 const viewZoom = { overview: 1, chase: 1 };
+// Where the last wheel turn or pinch pointed: zoomed in close, the camera
+// closes on that spot of the ship (render3d.js closeUp).
+const zoomAim = { x: 0, y: 0 };
 
 // Overview and chase views: dragging turns the camera round the ship (left
 // and right) and up and down, any direction in between. Changing the camera
@@ -10025,14 +11294,37 @@ const viewZoom = { overview: 1, chase: 1 };
 const viewOrbit = { yaw: 0, pitch: 0 };
 const VIEW_ORBIT_PER_PIXEL = 0.006;
 
+// Main menu: dragging turns the view round the moored ship and the wheel (or a
+// pinch) zooms on it. render3d.js reads these (harbourWant).
+const menuView = { yaw: 0, pitch: 0, zoom: 1, touched: false };
+const MENU_ZOOM_LIMITS = [0.05, 2.2];
+const MENU_PITCH_LIMITS = [-0.2, 1.2]; // radians from the standard view: sea level to high above
+
+function onMenuShip() {
+  return view3d.active && gameState === "menu" && !!game.harbourShip;
+}
+
 function orbitView(dx, dy) {
+  if (onMenuShip()) {
+    menuView.touched = true;
+    menuView.yaw += dx * VIEW_ORBIT_PER_PIXEL;
+    menuView.pitch = clamp(menuView.pitch + dy * VIEW_ORBIT_PER_PIXEL, ...MENU_PITCH_LIMITS);
+    return;
+  }
   if (!view3d.active || game.settings.cameraView === "bridge" || gameState !== "playing") return;
   viewOrbit.yaw += dx * VIEW_ORBIT_PER_PIXEL;
   viewOrbit.pitch = clamp(viewOrbit.pitch + dy * VIEW_ORBIT_PER_PIXEL, -1.5, 1.5);
 }
 
-// factor above 1 moves out, below 1 moves in.
-function zoomView(factor) {
+// factor above 1 moves out, below 1 moves in; (x, y) is where on screen.
+function zoomView(factor, x, y) {
+  zoomAim.x = x;
+  zoomAim.y = y;
+  if (onMenuShip()) {
+    menuView.touched = true;
+    menuView.zoom = clamp(menuView.zoom * factor, ...MENU_ZOOM_LIMITS);
+    return;
+  }
   const view = game.settings.cameraView;
   if (!view3d.active || !VIEW_ZOOM_LIMITS[view]) return;
   const [near, far] = VIEW_ZOOM_LIMITS[view];
@@ -10040,17 +11332,18 @@ function zoomView(factor) {
 }
 
 window.addEventListener("wheel", (e) => {
+  if (e.target.closest?.(".eula-text")) return; // the agreement scrolls
   e.preventDefault();
-  if (gameState !== "playing" && gameState !== "levelTransition") return;
-  zoomView(Math.exp(e.deltaY * 0.0012));
+  if (gameState !== "playing" && gameState !== "arrival" && gameState !== "menu") return;
+  zoomView(Math.exp(e.deltaY * 0.0012), e.clientX, e.clientY);
 }, { passive: false });
 
 window.addEventListener("touchmove", (e) => {
+  if (e.target.closest?.(".eula-text")) return; // the agreement scrolls
   e.preventDefault();
 }, { passive: false });
 
 // The Android app carries its files inside the APK, so it needs no offline cache.
-updateKeyHelp();
 if ("serviceWorker" in navigator && !IS_ANDROID_APP) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("./service-worker.js").catch(() => {
@@ -10062,8 +11355,10 @@ if ("serviceWorker" in navigator && !IS_ANDROID_APP) {
 game.profiles = loadProfiles();
 game.settings = loadSettings();
 initStore();
-// Start the sound system now if allowed (an installed app may play the
-// intro straight away); in a browser tab the first key press or click
-// starts it (handleKeyDown / handlePointerInteraction call ensureAudio).
+// Closing the page mid-voyage keeps the crew's experience.
+window.addEventListener("pagehide", crewFlush);
+// Start the sound with the intro. Where the browser holds it back, the first
+// key press or click wakes it (handleKeyDown / handlePointerInteraction call
+// ensureAudio).
 ensureAudio();
 requestAnimationFrame(tick);

@@ -15,6 +15,7 @@ const types = {
   ".jpg": "image/jpeg",
   ".ogg": "audio/ogg",
   ".glb": "model/gltf-binary",
+  ".bin": "application/octet-stream",
 };
 
 http

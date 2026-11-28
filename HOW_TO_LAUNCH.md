@@ -78,12 +78,12 @@ Chrome or Edge work best. You should see the "Harbour Run" title and the canvas.
 
 | Key | Action |
 |---|---|
-| `1` | Single player vs computer |
-| `2` | Local 2-player |
+| `1` | Set Sail: single player vs computer |
+| `2` | Two Captains: local 2-player |
 | `K` | Settings (gameplay and key bindings) |
 | Player 1 | Move `W A S D`, attack `Space` |
 | Player 2 | Move arrow keys, attack `Right Shift` |
-| Shop | `Enter` to buy, `Backspace` to sell, `Tab` to switch player |
+| Dockyard (`O` on the main menu) | `Enter` to buy, `Backspace` to sell, `Tab` to switch player |
 | `C` (while sailing) | Switch camera: overview / chase (chase is single player only) |
 
 ### Step 6: Stop the server
@@ -117,6 +117,7 @@ Breakpoints in `game.js` will work in Chrome.
 | Changes to `game.js` don't show up | Hard refresh with `Ctrl + F5`. The service worker caches files. If it still persists, open DevTools (`F12`) > Application > Service Workers > **Unregister**, then reload. |
 | Game looks old after an update | Same as above: hard refresh, or clear site data for `localhost:8080`. |
 | Keys do nothing | Click the game canvas once so it has keyboard focus. |
+| Intro music only starts after a click or key press | The browser is holding sound back. In Chrome, click the icon left of the address > **Site settings** > **Sound** > **Allow**, then reload. (Edge: Site permissions > **Media autoplay** > **Allow**.) The installed app and the Android app play it at launch. |
 | Game shows flat 2D circles instead of 3D | The browser has WebGL turned off or unsupported. Use an up-to-date Chrome or Edge and check that hardware acceleration is on (Settings > System). The game still plays in 2D. |
 | Settings or profiles disappear | Saved data lives in browser local storage for `localhost:8080`. Using a different port or browser means a fresh start. |
 
@@ -131,13 +132,61 @@ Breakpoints in `game.js` will work in Chrome.
 | `serve.js` | Small Node.js server, used when Python isn't installed |
 | `index.html` | Page and on-screen controls help |
 | `game.js` | All game logic, plus the HUD, menus and on-screen labels (2D layer) |
+| `crew.js` | Ship Crew: the people, their ranks and calls, and the crew screen |
 | `render3d.js` | The 3D world view (sea, sky, ships, hazards) drawn with Three.js |
 | `vendor/three/` | Three.js library and add-ons (MIT licence), kept locally so the game works offline |
 | `style.css` | Page layout and styling |
 | `service-worker.js` | Offline caching (network first) |
 | `manifest.json` | Install-as-app settings |
-| `assets/` | Icons |
+| `assets/` | Icons, sounds, pictures; `assets/crew/` holds the crew portraits (see its `CREDITS.md`) |
 | `.vscode/launch.json` | Chrome debug configuration |
+
+---
+
+## Ship Crew
+
+Main menu > **Ship Crew** (key **M**, also on the ship choice screen). Each ship
+type has its own posts, from 2 on the sailing boat to 7 on the aircraft
+carrier. Pick a person for each post; the choice is saved per captain and per
+ship. A ship only leaves harbour with every post filled: launching a
+short-handed ship opens its crew screen instead. Crew earn experience while their ship sails and climb from Rookie to
+Master. The Chart Plotter, Surface Radar and Weather Station bought in the
+Dockyard unlock the parts of a job that experience alone can't.
+
+There are four companies: navy officers and ratings for the warships (Assault
+Ship, Aircraft Carrier, Futuristic Nova), a 16th-century company of Maltese,
+Italian and Spanish hands for the Hospitaller Carrack, a United States Navy crew
+of 1943 for the Wartime Tanker (headed by a Commanding Officer, under whom the
+others learn faster), and civilians for everything else.
+
+## Wartime Tanker
+
+A 1943 armed tanker (340 points in the Dockyard), steered from the enclosed
+wheelhouse. Her bow and stern deck guns
+fire at targets ahead or astern, not on the beam. Like the other tankers she
+takes hits that sink other ships, plugs into the oil pump at anchor, and
+explodes if shot up badly.
+
+---
+
+## Licence agreement
+
+On the first start the loading screen shows the End User Licence Agreement.
+The game goes no further until **I Accept** is chosen. **Decline** closes the
+Android app; in a browser the game stays on that screen. Once accepted, it is
+never shown again, also after game updates or changes to its text. Acceptance is
+saved with the game's other data, so clearing that data, uninstalling, or using
+another browser or port counts as a first start.
+
+The text is in `index.html` (`#eula`). Before release, replace
+`[PUBLISHER NAME]`, `[COUNTRY]` and `[SUPPORT EMAIL]`.
+
+---
+
+## Main menu view
+
+Drag across the harbour to turn the view round your moored ship (any direction),
+and use the mouse wheel, or pinch on a touch screen, to zoom on it.
 
 ---
 

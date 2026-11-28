@@ -12,19 +12,128 @@
   <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-192.png" />
   <link rel="apple-touch-icon" href="assets/icon-192.png" />
   <link rel="manifest" href="manifest.json" />
+  <link rel="preload" as="image" href="assets/intro.jpg" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <main class="app-shell">
-    <header class="hud-top">
-      <h1>Harbour Run</h1>
-      <p>Cruise ship is blue. Pirate ship is yellow. Screen is locked for focus play.</p>
-    </header>
     <div class="stage">
       <canvas id="view3d" aria-hidden="true"></canvas>
       <canvas id="gameCanvas" width="1200" height="700" aria-label="Harbour Run game canvas"></canvas>
       <div class="alarm-border" aria-hidden="true"></div>
-      <div id="loading" class="loading">Loading Harbour Run...<br />please wait</div>
+      <!-- The intro: shown while the game loads and the graphics are checked. -->
+      <div id="loading" class="loading">
+        <h1 class="intro-title">Harbour Run</h1>
+        <!-- Game updates: add each one as a <p> here. -->
+        <section class="intro-news" aria-labelledby="newsTitle">
+          <h2 id="newsTitle">News</h2>
+          <p>No news yet. Game updates will appear here.</p>
+        </section>
+        <!-- Licence agreement: shown until accepted, then never again (game.js
+             EULA_KEY). Fill in the [ ] items before release. -->
+        <div id="eula" class="eula" role="dialog" aria-labelledby="eulaTitle">
+          <div id="eulaText" class="eula-text" tabindex="0">
+            <h2 id="eulaTitle">Harbour Run - End User Licence Agreement</h2>
+            <p>Last updated: 27 November 2026</p>
+            <p>This agreement is between you and [PUBLISHER NAME] ("we", "us"), the publisher of Harbour Run (the "Game"). By selecting "I Accept" you agree to it. If you do not agree, select "Decline" and do not use the Game.</p>
+
+            <h3>1. Who may accept</h3>
+            <p>If you are under 18, or under the age of majority where you live, your parent or guardian must read this agreement and accept it for you.</p>
+
+            <h3>2. Your licence</h3>
+            <p>The Game is licensed to you, not sold. We give you a personal, non-exclusive, non-transferable licence to install and play it for your own private, non-commercial entertainment on devices you own or control. If you got the Game from an app store, that store's usage rules also apply, including any rule on the number of devices.</p>
+            <p>You may share screenshots and videos of your own play.</p>
+
+            <h3>3. What you may not do</h3>
+            <p>Unless the law gives you a right that cannot be excluded, you may not:</p>
+            <ul>
+              <li>copy, sell, rent, lend, sublicense or distribute the Game or any part of it;</li>
+              <li>modify it, make derivative works from it, reverse engineer it or extract its code, artwork or sounds;</li>
+              <li>bypass or tamper with payment, ownership or security checks, or unlock paid content without paying for it;</li>
+              <li>remove or hide copyright, trade mark or licence notices;</li>
+              <li>use the Game in any unlawful way.</li>
+            </ul>
+
+            <h3>4. Ownership</h3>
+            <p>We and our licensors keep all rights in the Game, including its code, design, artwork, text, sounds and name. This agreement gives you only the rights stated in it.</p>
+
+            <h3>5. Purchases and game items</h3>
+            <p>Optional premium packs may be offered as one-time purchases through an app store such as the Microsoft Store. The store handles payment, billing and refunds under its own terms, and your ownership is checked with the store.</p>
+            <p>Points, ships, equipment, crew and other game items exist only inside the Game. They have no money value and cannot be exchanged, transferred or redeemed for money or goods.</p>
+
+            <h3>6. Your data</h3>
+            <p>The Game keeps player names, settings, progress and scores on your own device or in your browser. It does not send them to us. They may be lost if you clear the Game's data, uninstall it or change device, and your device or browser may back them up under its own settings. App stores, and the host of a website you play on, handle data (for example purchase details or your IP address) under their own privacy policies.</p>
+
+            <h3>7. Health warning</h3>
+            <p>The Game contains flashing lights and fast-moving pictures. A small number of people may have seizures when exposed to them, even with no previous history. Stop playing and seek medical advice if you feel dizzy or unwell, notice changes in your vision, twitch or lose awareness. Take regular breaks.</p>
+
+            <h3>8. A game, not a navigation tool</h3>
+            <p>The Game is fiction made for entertainment. Do not rely on it for real navigation, seamanship, safety or training. Its characters and crew portraits are fictional; any likeness to a real person is coincidental.</p>
+
+            <h3>9. Third-party material</h3>
+            <p>The Game includes material from others, including the Three.js library (MIT licence), crew portraits from the SFHQ-T2I collection (MIT licence) and sound clips released as CC0. Their own licences apply to that material and nothing here limits the rights those licences give you. The notices are included with the Game's files.</p>
+
+            <h3>10. Updates and availability</h3>
+            <p>We may update, change or stop offering the Game or parts of it. We do not promise that updates or support will always be available, except where the law requires them.</p>
+
+            <h3>11. Ending the agreement</h3>
+            <p>You may end this agreement at any time by deleting the Game and stopping its use. It ends automatically if you seriously break its terms, and you must then stop using the Game. Sections that by their nature should continue, including ownership and the limits on liability, remain in force.</p>
+
+            <h3>12. No warranty</h3>
+            <p>As far as the law allows, the Game is provided "as is" and "as available", without warranties of any kind, including that it will be uninterrupted, free of errors or fit for a particular purpose.</p>
+
+            <h3>13. Limit of liability</h3>
+            <p>As far as the law allows, we are not liable for indirect or consequential loss, or for loss of profit, data or saved progress. Our total liability for the Game is limited to the amount you paid for it and its packs in the 12 months before the claim.</p>
+            <p>Nothing in this agreement excludes or limits liability for death or personal injury caused by negligence, for fraud, or for anything else the law does not allow to be excluded. Your statutory rights as a consumer are not affected.</p>
+
+            <h3>14. Law and disputes</h3>
+            <p>The law of [COUNTRY] governs this agreement, and its courts handle disputes. If you are a consumer, you also keep the protection of the mandatory laws of the country where you live and may bring proceedings in its courts where those laws allow.</p>
+
+            <h3>15. General</h3>
+            <p>This is the whole agreement between you and us about the Game, apart from store terms that apply to you. If any part cannot be enforced, the rest remains in force.</p>
+
+            <h3>16. Contact</h3>
+            <p>[PUBLISHER NAME], [SUPPORT EMAIL]</p>
+          </div>
+          <p id="eulaNote" class="eula-note" role="status">You must accept the agreement to play.</p>
+          <div class="eula-buttons">
+            <button type="button" id="eulaDecline">Decline</button>
+            <button type="button" id="eulaAccept">I Accept</button>
+          </div>
+        </div>
+        <div class="intro-text">
+          <p>Take command of your ship: roam in free play or take on a mission.</p>
+          <p>Steer clear of volcanoes, icebergs, storms and sea creatures.</p>
+          <p>Fight off pirates, earn points and upgrade your fleet in the dockyard.</p>
+          <p>Sail solo, or as two captains side by side.</p>
+        </div>
+        <div id="loadingStatus" class="intro-status" role="status">Loading... please wait</div>
+      </div>
+      <!-- Shown from the Dockyard button until the dock is on screen. -->
+      <div class="dock-splash" role="status">
+        <div class="spinner" aria-hidden="true"></div>
+        <h2>Please wait</h2>
+        <p>Taking the ship to the dock...</p>
+      </div>
+      <!-- Shown while the harbours change age (the carrack picked or put away). -->
+      <div class="era-splash" role="status">
+        <div class="spinner" aria-hidden="true"></div>
+        <h2>Please wait</h2>
+        <p id="eraStatus"></p>
+      </div>
+      <!-- Rename player (game.js renameShopProfile). -->
+      <div id="renamePopup" class="name-popup" role="dialog" aria-modal="true" aria-labelledby="renameTitle" hidden>
+        <form id="renameForm">
+          <h2 id="renameTitle">Rename player</h2>
+          <label for="renameInput" id="renameLabel">New name</label>
+          <input id="renameInput" type="text" maxlength="18" autocomplete="off" spellcheck="false" enterkeyhint="done" />
+          <div class="name-buttons">
+            <button type="button" id="renameCancel">Cancel</button>
+            <button type="submit">Save</button>
+          </div>
+          <p class="name-hint">Enter to save, Esc to cancel</p>
+        </form>
+      </div>
       <!-- Touch screens only (phones, tablets): on-screen controls. -->
       <div id="touchControls" class="touch-controls" aria-hidden="true">
         <div class="tc-play">
@@ -45,35 +154,17 @@
         <button class="tc-back tc-corner" data-code="Escape">Back</button>
       </div>
     </div>
-    <section class="controls">
-      <div>
-        <h2>Player 1</h2>
-        <p>Default Move: W A S D</p>
-        <p>Default Attack: Space</p>
-        <p><span data-keyhelp="p1Deterrent">G</span> = Acoustic Deterrent (if bought)</p>
-      </div>
-      <div>
-        <h2>Player 2 (Local Mode)</h2>
-        <p>Default Move: Arrow Keys</p>
-        <p>Default Attack: Right Shift</p>
-        <p><span data-keyhelp="p2Deterrent">;</span> = Acoustic Deterrent (if bought)</p>
-      </div>
-      <div>
-        <h2>Menu</h2>
-        <p>1 = Single Player vs Computer</p>
-        <p>2 = Local 2 Player</p>
-        <p>K = Settings (custom gameplay + all key bindings)</p>
-        <p><span data-keyhelp="cameraView">C</span> = Switch camera (overview / chase / bridge) while sailing</p>
-        <p><span data-keyhelp="nightMode">N</span> = Day / night</p>
-        <p>Shop: Enter to buy, Backspace to sell, Tab to switch player</p>
-      </div>
-    </section>
   </main>
   <script type="importmap">
     { "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }
   </script>
   <script src="audio.js"></script>
+  <script src="crew.js"></script>
+  <script src="missions.js"></script>
   <script src="game.js"></script>
-  <script type="module" src="render3d.js"></script>
+  <!-- The 3D world starts after the intro has been painted. -->
+  <script type="module">
+    requestAnimationFrame(() => requestAnimationFrame(() => import("./render3d.js")));
+  </script>
 </body>
 </html>

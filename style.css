@@ -5,7 +5,6 @@
   --sea-b: #113e56;
   --text: #ecf5f9;
   --accent: #f2b531;
-  --card: rgba(12, 38, 54, 0.78);
 }
 
 * {
@@ -29,46 +28,19 @@ html {
   overflow: hidden;
 }
 
+/* The game fills the screen. */
 .app-shell {
   width: 100vw;
   height: 100vh;
-  margin: 0 auto;
-  padding: 10px 12px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) clamp(220px, 28vw, 300px);
-  grid-template-rows: auto minmax(0, 1fr);
-  grid-template-areas:
-    "header header"
-    "game controls";
-  gap: 12px;
-}
-
-.hud-top {
-  grid-area: header;
-}
-
-.hud-top h1 {
-  margin: 0;
-  letter-spacing: 1px;
-}
-
-.hud-top p {
-  margin: 4px 0 0;
-  color: #c7dbe5;
 }
 
 /* The 3D world canvas fills the stage; the 2D canvas (HUD, menus, labels)
    sits on top, letterboxed to keep its 1200x700 layout. */
 .stage {
-  grid-area: game;
   position: relative;
-  min-height: 0;
-  max-height: calc(100vh - 90px);
+  height: 100%;
   overflow: hidden;
-  border-radius: 14px;
-  border: 2px solid rgba(236, 245, 249, 0.35);
   background: linear-gradient(180deg, var(--sea-a), var(--sea-b));
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
 }
 
 .stage canvas {
@@ -89,108 +61,18 @@ body.view-3d:not(.playing-mode) #gameCanvas {
   background: rgba(2, 12, 18, 0.62);
 }
 
-/* the dockyard (shop) is a scene to look at: no tint over it */
+/* The main menu is the harbour itself: shaded only behind the top bar and the
+   captains' details at the bottom. */
+body.view-3d.at-main-menu #gameCanvas {
+  background: linear-gradient(180deg, rgba(2, 12, 18, 0.72), transparent 27%, transparent 74%, rgba(2, 12, 18, 0.74));
+}
+
+/* the dockyard is a scene to look at: no tint over it */
 body.view-3d.in-dockyard #gameCanvas {
   background: transparent;
 }
 
-.controls {
-  grid-area: controls;
-  display: grid;
-  gap: 8px;
-  align-content: start;
-  overflow-y: auto;
-  max-height: calc(100vh - 90px);
-  grid-template-columns: 1fr;
-}
-
-body.playing-mode .app-shell {
-  grid-template-columns: 1fr;
-  grid-template-rows: minmax(0, 1fr);
-  grid-template-areas:
-    "game";
-  padding: 0;
-  gap: 0;
-}
-
-body.playing-mode .hud-top {
-  display: none;
-}
-
-body.playing-mode .controls {
-  display: none;
-}
-
-body.playing-mode .stage {
-  max-height: 100vh;
-  border-radius: 0;
-  border: none;
-  box-shadow: none;
-}
-
-.controls div {
-  background: linear-gradient(155deg, var(--card), rgba(6, 23, 35, 0.76));
-  border: 1px solid rgba(172, 224, 245, 0.24);
-  border-radius: 14px;
-  padding: 10px 14px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
-}
-
-.controls h2 {
-  margin: 0 0 6px;
-  font-size: 1rem;
-  color: var(--accent);
-}
-
-.controls p {
-  margin: 2px 0;
-  font-size: 0.9rem;
-  color: #cae2ef;
-}
-
-@media (max-width: 720px) {
-  .app-shell {
-    padding: 8px;
-    gap: 8px;
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr) auto;
-    grid-template-areas:
-      "header"
-      "game"
-      "controls";
-  }
-
-  .controls {
-    max-height: none;
-  }
-
-  .stage {
-    max-height: calc(100vh - 230px);
-  }
-}
-
-/* Touch screens (phones, tablets, the Android app): the game fills the
-   screen, the keyboard help is hidden, and on-screen controls appear. */
-body.touch-ui .app-shell {
-  grid-template-columns: 1fr;
-  grid-template-rows: minmax(0, 1fr);
-  grid-template-areas: "game";
-  padding: 0;
-  gap: 0;
-}
-
-body.touch-ui .hud-top,
-body.touch-ui .controls {
-  display: none;
-}
-
-body.touch-ui .stage {
-  max-height: 100vh;
-  border-radius: 0;
-  border: none;
-  box-shadow: none;
-}
-
+/* Touch screens (phones, tablets, the Android app): on-screen controls appear. */
 .touch-controls,
 .tc-play,
 .tc-back {
@@ -212,6 +94,11 @@ body.touch-ui:not(.playing-mode):not(.at-main-menu) .tc-back {
   display: block;
 }
 
+/* out of the picture while the cannon shot plays (still touchable) */
+body.cannon-shot .touch-controls {
+  opacity: 0;
+}
+
 .touch-controls button,
 .tc-stick {
   pointer-events: auto;
@@ -224,7 +111,8 @@ body.touch-ui:not(.playing-mode):not(.at-main-menu) .tc-back {
 
 .touch-controls button {
   border-radius: 12px;
-  font-size: clamp(11px, 3.2vmin, 16px);
+  font-size: clamp(14px, 4.2vmin, 24px);
+  font-weight: 600;
   padding: 0;
 }
 
@@ -235,9 +123,9 @@ body.touch-ui:not(.playing-mode):not(.at-main-menu) .tc-back {
 .tc-stick {
   position: absolute;
   left: 3vmin;
-  bottom: 13vmin; /* above the damage panel */
-  width: 34vmin;
-  height: 34vmin;
+  bottom: 16vmin; /* above the damage panel */
+  width: 38vmin;
+  height: 38vmin;
   border-radius: 50%;
 }
 
@@ -245,9 +133,9 @@ body.touch-ui:not(.playing-mode):not(.at-main-menu) .tc-back {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 15vmin;
-  height: 15vmin;
-  margin: -7.5vmin 0 0 -7.5vmin;
+  width: 17vmin;
+  height: 17vmin;
+  margin: -8.5vmin 0 0 -8.5vmin;
   border-radius: 50%;
   background: rgba(236, 245, 249, 0.55);
   pointer-events: none;
@@ -255,8 +143,8 @@ body.touch-ui:not(.playing-mode):not(.at-main-menu) .tc-back {
 
 .tc-fire {
   position: absolute;
-  right: 2vmin;
-  bottom: 6vmin;
+  right: 1vmin;
+  bottom: 5vmin;
   width: 24vmin;
   height: 24vmin;
   border-radius: 50% !important;
@@ -267,45 +155,348 @@ body.touch-ui:not(.playing-mode):not(.at-main-menu) .tc-back {
 .tc-side {
   position: absolute;
   right: 2vmin;
-  bottom: 33vmin; /* above Fire, clear of the minimap */
+  bottom: 32vmin; /* above Fire, clear of the minimap */
   display: grid;
-  grid-template-columns: repeat(2, 14vmin);
-  gap: 1.6vmin;
+  grid-template-columns: repeat(2, 18vmin);
+  gap: 1.4vmin;
 }
 
 .tc-side button {
-  height: 10vmin;
+  height: 12.5vmin;
 }
 
 .tc-corner {
   position: absolute;
   top: 2vmin;
   left: 2vmin;
-  width: 15vmin;
-  height: 9vmin;
+  width: 21vmin;
+  height: 13vmin;
 }
 
-/* Shown until the game (and its 3D world) draws smoothly; game.js adds
-   body.loaded. The first 3D frames can take seconds on a phone. */
+/* Pause stays clear of the numbers in the top left corner. */
+.tc-play .tc-corner {
+  top: 11vmin;
+}
+
+/* The intro, shown until the game (and its 3D world) draws smoothly; game.js
+   then adds body.loaded and it fades away to the harbour. Behind the text is a
+   picture of the fleet (assets/intro.jpg, taken from the 3D game): the name
+   sits in its sky, the words on the sea below the ships. The animations only
+   move and fade, so they keep running while the 3D world is being built. */
 .loading {
   position: absolute;
   inset: 0;
   z-index: 5;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  gap: 1.6vmin;
+  padding: 3vmin;
   text-align: center;
-  font-size: clamp(18px, 5vmin, 32px);
-  line-height: 1.5;
   color: var(--text);
-  background: linear-gradient(160deg, var(--bg-deep), var(--bg-mid));
+  background:
+    linear-gradient(180deg, rgba(3, 14, 24, 0.7), transparent 30%, transparent 60%, rgba(3, 14, 24, 0.8) 76%, rgba(3, 14, 24, 0.92)),
+    url("assets/intro.jpg") center / cover,
+    var(--bg-deep);
+  transition: opacity 0.9s ease, visibility 0.9s;
 }
 
 body.loaded .loading {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* The "please wait" screens on the way to the dockyard (game.js dockLoading)
+   and while the harbours change age (eraLoading). The spinner only rotates,
+   so it keeps turning while the scenery is being built. */
+.dock-splash,
+.era-splash {
+  display: none;
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2vmin;
+  text-align: center;
+  background: linear-gradient(180deg, var(--bg-deep), var(--bg-mid) 62%, var(--sea-b));
+}
+
+body.docking .dock-splash,
+body.era-changing .era-splash {
+  display: flex;
+}
+
+.dock-splash h2,
+.era-splash h2 {
+  margin: 0;
+  font-size: clamp(24px, 6vmin, 52px);
+  color: var(--accent);
+}
+
+.dock-splash p,
+.era-splash p {
+  margin: 0;
+  font-size: clamp(15px, 3.4vmin, 26px);
+  color: #cae2ef;
+}
+
+.spinner {
+  width: 11vmin;
+  height: 11vmin;
+  border-radius: 50%;
+  border: 1.1vmin solid rgba(236, 245, 249, 0.2);
+  border-top-color: var(--accent);
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.intro-title {
+  margin: 0;
+  font-size: clamp(40px, 13vmin, 120px);
+  line-height: 1.15;
+  letter-spacing: 0.04em;
+  background: linear-gradient(90deg, #6ce5d9, #f9c15f);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0.5vmin 0.9vmin rgba(0, 12, 22, 0.9));
+  animation: intro-title 1.4s ease-out both;
+}
+
+/* Game updates, in the sky under the name. */
+.intro-news {
+  width: min(70vmin, 100%);
+  padding: 1.2vmin 2vmin;
+  font-size: clamp(12px, 2.4vmin, 20px);
+  color: #e4f2fa;
+  background: rgba(9, 26, 40, 0.72);
+  border: 2px solid rgba(186, 234, 255, 0.55);
+  border-radius: 12px;
+  animation: intro-line 0.8s ease-out 0.8s both;
+}
+
+.intro-news h2 {
+  margin: 0 0 0.5vmin;
+  font-size: 1.25em;
+  color: var(--accent);
+}
+
+.intro-news p {
+  margin: 0.4vmin 0;
+}
+
+.intro-text {
+  margin-top: auto; /* the words and the status stay at the bottom */
+  font-size: clamp(13px, 2.8vmin, 24px);
+  color: #e4f2fa;
+  text-shadow: 0 1px 4px rgba(0, 12, 22, 0.95);
+}
+
+.intro-text p {
+  margin: 0.5vmin 0;
+  animation: intro-line 0.8s ease-out both;
+}
+
+.intro-text p:nth-child(1) { animation-delay: 1.1s; }
+.intro-text p:nth-child(2) { animation-delay: 2.2s; }
+.intro-text p:nth-child(3) { animation-delay: 3.3s; }
+.intro-text p:nth-child(4) { animation-delay: 4.4s; }
+
+.intro-status {
+  font-size: clamp(13px, 2.6vmin, 20px);
+  color: var(--accent);
+  text-shadow: 0 1px 4px rgba(0, 12, 22, 0.95);
+}
+
+/* The licence agreement takes the place of the news and intro words until it
+   is accepted; its text scrolls, the buttons stay on screen. */
+.eula {
   display: none;
 }
 
-/* Ship's fire alarm on the bridge (game.js fireAlarmOn): a red border that
+body.eula-pending .eula {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1.2vmin;
+  width: min(860px, 100%);
+  min-height: 0;
+}
+
+body.eula-pending .intro-news,
+body.eula-pending .intro-text {
+  display: none;
+}
+
+body.eula-pending .intro-title {
+  font-size: clamp(26px, 7vmin, 64px);
+}
+
+body.eula-pending .intro-status {
+  margin-top: 0;
+}
+
+.eula-text {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 1vmin 2.4vmin;
+  text-align: left;
+  font-size: clamp(13px, 2.2vmin, 17px);
+  line-height: 1.45;
+  background: rgba(9, 26, 40, 0.94);
+  border: 2px solid rgba(186, 234, 255, 0.55);
+  border-radius: 12px;
+}
+
+.eula-text:focus {
+  outline: none;
+  border-color: #ffd182;
+}
+
+.eula-text h2,
+.eula-text h3 {
+  color: var(--accent);
+}
+
+.eula-text h2 {
+  font-size: 1.3em;
+}
+
+.eula-text h3 {
+  font-size: 1.05em;
+}
+
+.eula-note {
+  margin: 0;
+  font-size: clamp(12px, 2.4vmin, 17px);
+  color: #e4f2fa;
+}
+
+.eula-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+}
+
+.eula-buttons button {
+  width: 260px;
+  min-height: 56px;
+  padding: 1.6vmin 0;
+  font-family: inherit;
+  font-size: clamp(19px, 3.8vmin, 26px);
+  color: var(--text);
+  cursor: pointer;
+  background: rgba(110, 40, 34, 0.95);
+  border: 2px solid rgba(194, 227, 255, 0.4);
+}
+
+#eulaAccept {
+  background: rgba(24, 92, 70, 0.95);
+}
+
+.eula-buttons button:focus-visible {
+  outline: none;
+  border-color: #ffd182;
+}
+
+@keyframes intro-title {
+  from { opacity: 0; transform: translateY(4vmin) scale(0.92); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes intro-line {
+  from { opacity: 0; transform: translateY(1.5vmin); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Rename player popup. It sits near the top, so a phone's on-screen keyboard
+   doesn't cover it. */
+.name-popup {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 8vh;
+  background: rgba(2, 10, 18, 0.6);
+}
+
+.name-popup[hidden] {
+  display: none;
+}
+
+.name-popup form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.8vmin;
+  width: min(520px, 92vw);
+  padding: 3vmin;
+  text-align: center;
+  background: rgba(9, 26, 40, 0.97);
+  border: 2px solid rgba(186, 234, 255, 0.55);
+}
+
+.name-popup h2 {
+  margin: 0;
+  font-size: clamp(20px, 4vmin, 28px);
+  font-weight: 400;
+}
+
+.name-popup label,
+.name-hint {
+  margin: 0;
+  font-size: clamp(12px, 2.4vmin, 16px);
+  color: #a9cbe0;
+}
+
+.name-popup input,
+.name-popup button {
+  font-family: inherit;
+  font-size: clamp(16px, 2.8vmin, 20px);
+  color: var(--text);
+  border: 2px solid rgba(194, 227, 255, 0.4);
+}
+
+.name-popup input {
+  padding: 1.2vmin;
+  text-align: center;
+  background: var(--bg-deep);
+}
+
+.name-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+}
+
+.name-popup button {
+  width: 240px;
+  min-height: 56px;
+  padding: 1.6vmin 0;
+  cursor: pointer;
+  background: rgba(110, 40, 34, 0.92);
+}
+
+.name-popup button[type="submit"] {
+  background: rgba(24, 92, 70, 0.92);
+}
+
+.name-popup input:focus,
+.name-popup button:focus-visible {
+  outline: none;
+  border-color: #ffd182;
+}
+
+/* Ship's alarm on the bridge (game.js bridgeAlarmOn): a red border that
    pulses around the whole screen. Taps go through it. */
 .alarm-border {
   display: none;
@@ -316,7 +507,7 @@ body.loaded .loading {
   box-shadow: inset 0 0 0 8px rgba(225, 30, 20, 0.95), inset 0 0 70px 20px rgba(225, 30, 20, 0.55);
 }
 
-body.fire-alarm .alarm-border {
+body.bridge-alarm .alarm-border {
   display: block;
   animation: alarm-flash 0.6s ease-in-out infinite;
 }

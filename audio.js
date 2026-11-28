@@ -28,11 +28,12 @@ const sfx = {
 };
 
 const SAMPLE_NAMES = [
-  "gull_1", "gull_2", "gull_3", "gull_4", "gull_5", "gull_6", "gull_7",
-  "sea_loop", "wave_1", "wave_2", "wave_3", "thunder", "rain_loop",
+  "intro", "sea_loop", // first: heard as the game launches
+  "gull_1","gull_2", "gull_3", "gull_4", "gull_5", "gull_6", "gull_7",
+  "wave_1", "wave_2", "wave_3", "thunder", "rain_loop",
   "cannon_fire", "hit_ship", "hit_rock", "ship_sink", "explosion",
   "missile_launch", "bubbles", "volcano_rumble", "lava_loop", "ship_bump",
-  "intro", "level_complete", "ui_move", "ui_click", "ui_confirm", "ui_back", "ui_error"
+  "level_complete", "ui_move", "ui_click", "ui_confirm", "ui_back", "ui_error"
 ];
 
 // Loads the clips in the background; until one arrives (or if it can't),
@@ -88,8 +89,8 @@ function soundLevel() {
   return SOUND_LEVELS[game.settings.soundLevel] || SOUND_LEVELS[2];
 }
 
-// Called once the audio context exists (after the first key press or click,
-// as browsers require). Builds the master output and starts the ambience.
+// Called once, when the audio context is created. Builds the master output and
+// starts the ambience.
 function setupSound(ac) {
   const master = ac.createGain();
   master.gain.value = soundLevel().volume;
@@ -128,6 +129,8 @@ function setupSound(ac) {
 //   splash  how much water you hear slapping and spraying at speed
 const ENGINE_PROFILES = {
   Sailing: { diesel: 0, pitch: 30, rise: 0, bright: 150, chug: 0, chugRate: 1, whine: 0, splash: 1.9 },
+  Carrack: { diesel: 0, pitch: 30, rise: 0, bright: 150, chug: 0, chugRate: 1, whine: 0, splash: 1.6 },
+  Galley: { diesel: 0, pitch: 30, rise: 0, bright: 150, chug: 0, chugRate: 1, whine: 0, splash: 1.7 },
   Carrier: { diesel: 0.22, pitch: 24, rise: 12, bright: 140, chug: 0, chugRate: 1, whine: 0, splash: 1.5 },
   Cruise: { diesel: 0.45, pitch: 30, rise: 20, bright: 210, chug: 0.08, chugRate: 6, whine: 0, splash: 1 },
   Cargo: { diesel: 1, pitch: 22, rise: 22, bright: 260, chug: 0.6, chugRate: 4.5, whine: 0, splash: 0.9 },
@@ -139,6 +142,8 @@ const ENGINE_PROFILES = {
   Tug: { diesel: 1.2, pitch: 34, rise: 40, bright: 420, chug: 0.5, chugRate: 7, whine: 0, splash: 1.2 },
   Icebreaker: { diesel: 1.1, pitch: 26, rise: 24, bright: 300, chug: 0.4, chugRate: 5, whine: 0, splash: 1 },
   Tanker: { diesel: 1, pitch: 20, rise: 18, bright: 220, chug: 0.65, chugRate: 3.8, whine: 0, splash: 0.85 },
+  // Triple-expansion steam engine: a slow, heavy beat.
+  WarTanker: { diesel: 0.8, pitch: 18, rise: 14, bright: 170, chug: 0.8, chugRate: 2.4, whine: 0, splash: 1 },
   // Steam turbine: a smooth hum with a soft whine, hardly any piston beat.
   GasTanker: { diesel: 0.5, pitch: 26, rise: 18, bright: 200, chug: 0.1, chugRate: 5, whine: 0.2, whinePitch: 180, whineRise: 200, splash: 0.9 },
   Futuristic: { diesel: 0.12, pitch: 30, rise: 20, bright: 180, chug: 0, chugRate: 1, whine: 0.55, whinePitch: 220, whineRise: 560, splash: 0.7 }
@@ -345,11 +350,12 @@ function burst(dest, o) {
 // Intro, menus, bumps
 // ---------------------------------------------------------------------------
 
-// Plays once, as soon as sound is allowed (the first key press or click) and
-// the music has loaded, with a ship's horn and gulls over it.
+// Plays once, when the intro has loaded (game.js introReady), sound is allowed
+// and the music has loaded, with a ship's horn and gulls over it. A click made
+// during loading only unlocks sound; it does not start the music early.
 function playIntro() {
-  if (sfx.introDone || !sfx.samples.intro || game.audioContext.state !== "running") return;
-  if (gameState === "playing" || gameState === "levelTransition" || soundLevel().volume === 0) return;
+  if (sfx.introDone || !introReady || !sfx.samples.intro || game.audioContext?.state !== "running") return;
+  if (gameState === "playing" || gameState === "arrival" || soundLevel().volume === 0) return;
   sfx.introDone = true;
   const ac = game.audioContext;
   const g = ac.createGain();
@@ -364,9 +370,9 @@ function playIntro() {
   window.setTimeout(playGull, 1600);
 }
 
-// A short brass fanfare when you reach the harbour and the level is done.
+// A short brass fanfare when you reach the harbour at the end of a crossing or mission.
 // Returns how long it plays (seconds), or 0 when nothing played.
-function playLevelComplete() {
+function playArrival() {
   const bus = soundBus(undefined, undefined, 0.6);
   if (!bus || !sample(bus, "level_complete")) return 0;
   return sfx.samples.level_complete.duration;
@@ -769,9 +775,9 @@ function nearness(f, x, y, r, falloff) {
   return clamp(1 - d / falloff, 0, 1);
 }
 
-// The ship's fire alarm: an electric bell (two tones, struck about 17 times
+// The ship's alarm: an electric bell (two tones, struck about 17 times
 // a second), made once and left running silent; updateSound opens it in
-// bursts while game.js fireAlarmOn() says so.
+// bursts while game.js bridgeAlarmOn() says so.
 function fireAlarmVoice(ac) {
   const out = ac.createGain();
   out.gain.value = 0;
@@ -804,8 +810,8 @@ const FIRE_ALARM_VOLUME = 0.07;
 // ---------------------------------------------------------------------------
 // The dockyard (shop): calm music, welding, machinery, the dock filling and
 // draining, a horn as the ship arrives, and gulls over the sea (the sea and
-// its waves are the game's usual ambience). render3d.js sets game.dock.welding,
-// pumping, gateMoving and horns.
+// its waves are the game's usual ambience). render3d.js sets game.dock.welding
+// (or, for the carrack, caulking and knocks), pumping, gateMoving and horns.
 // ---------------------------------------------------------------------------
 
 // Slow pad chords, used only if the music clip isn't there.
@@ -847,7 +853,8 @@ function updateDockSound(t) {
   }
 
   const weld = !!(d && d.welding);
-  setLoop(L.dockHum, d ? 0.12 + (d.pumping ? 0.08 : 0) : 0, d && d.pumping ? 230 : 170);
+  // No engines or clanging steel in the carrack's arsenal: water, gulls and a bell.
+  setLoop(L.dockHum, d && !d.arsenal ? 0.12 + (d.pumping ? 0.08 : 0) : 0, d && d.pumping ? 230 : 170);
   setLoop(L.dockWater, d && d.pumping ? 0.26 : 0, 520 + Math.sin(t * 0.8) * 120);
   setLoop(L.dockWeld, weld ? 0.02 + Math.random() * 0.05 : 0);
   if (weld && t >= (sfx.nextCrackleAt || 0)) {
@@ -858,8 +865,30 @@ function updateDockSound(t) {
       if (Math.random() < 0.4) tone(bus, { type: "sawtooth", from: 100, dur: 0.12, peak: 0.03 });
     }
   }
+  // The carrack's repairs: a wooden knock each time a caulking mallet lands, and the fire under the pitch pot.
+  const knocks = d ? d.knocks || 0 : 0;
+  if (d && d.caulking && knocks !== (sfx.dockKnocks || 0)) {
+    const bus = soundBus(undefined, undefined, 0.8);
+    if (bus) {
+      tone(bus, { type: "triangle", from: 230 + Math.random() * 60, to: 130, dur: 0.1, peak: 0.16 });
+      burst(bus, { freq: 1100 + Math.random() * 500, dur: 0.04, peak: 0.14 });
+    }
+  }
+  sfx.dockKnocks = knocks;
+  if (d && d.caulking && t >= (sfx.nextPitchAt || 0)) {
+    sfx.nextPitchAt = t + 0.12 + Math.random() * 0.4;
+    const bus = soundBus(undefined, undefined, 0.4);
+    if (bus) burst(bus, { filter: "highpass", freq: 1800 + Math.random() * 2200, dur: 0.02 + Math.random() * 0.03, peak: 0.05 + Math.random() * 0.05 });
+  }
   // A metal clang now and then from somewhere in the yard.
-  if (d && t >= (sfx.nextClangAt || 0)) {
+  if (d && d.arsenal && t >= (sfx.nextBellAt || 0)) {
+    sfx.nextBellAt = t + 9 + Math.random() * 8;
+    const bus = soundBus(undefined, undefined, 0.4);
+    if (bus) {
+      for (const [from, peak, dur] of [[392, 0.07, 3.2], [784, 0.03, 2], [1046, 0.018, 1.2]]) tone(bus, { type: "sine", from, dur, peak });
+    }
+  }
+  if (d && !d.arsenal && t >= (sfx.nextClangAt || 0)) {
     sfx.nextClangAt = t + 2.5 + Math.random() * 4;
     const bus = soundBus(undefined, undefined, 0.45);
     if (bus) {
@@ -888,7 +917,7 @@ function updateSound(dt) {
   const L = sfx.loops;
   const t = game.audioContext.currentTime;
   if (!sfx.fireAlarm) sfx.fireAlarm = fireAlarmVoice(game.audioContext);
-  const ringing = fireAlarmOn() && t % FIRE_ALARM_CYCLE < FIRE_ALARM_RING;
+  const ringing = bridgeAlarmOn() && t % FIRE_ALARM_CYCLE < FIRE_ALARM_RING;
   sfx.fireAlarm.gain.setTargetAtTime(ringing ? FIRE_ALARM_VOLUME : 0, t, 0.015);
   const f = cameraFocus();
   const sailing = f.inWorld && gameState === "playing" && !game.cannonCinematic && !game.exitConfirm;
